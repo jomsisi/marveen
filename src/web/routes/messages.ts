@@ -19,6 +19,31 @@ import { parseQualifiedId, formatQualifiedId } from '../federation/address.js'
 import { getFederationConfig } from '../federation/config.js'
 import type { RouteContext } from './types.js'
 
+/**
+ * Should closing `done` produce a completion notification back to its sender?
+ *
+ * Three separate reasons to stay silent, and each one is a bug we have already paid for:
+ *
+ *  1. SELF-MESSAGE -- nobody to tell.
+ *  2. THE MESSAGE IS ITSELF A COMPLETION REPORT (`[Eredmény]` prefix). Without this the
+ *     delegator's reply would close the notification, which would notify back, forever.
+ *  3. THE SENDER IS NOT A RUNNABLE AGENT. The notification is addressed to the ORIGINAL
+ *     SENDER, and that is not always something with a session: the `system` pseudo-sender
+ *     posts new-teammate notices and handoff-failure warnings. A notification addressed to
+ *     it can never be delivered -- the router burns the whole retry window, then emits a
+ *     `[handoff-failure]`, which does NOT start with `[Eredmény]`, so closing THAT would
+ *     produce another undeliverable notification. Measured 2026-08-10: a self-sustaining
+ *     chain, not one-off noise (kanban f0601aff).
+ *     What must NOT be done instead: silencing the handoff-failure warning. That warning is
+ *     the only signal we get when a REAL sub-agent session is dead. The notification is what
+ *     must not be created.
+ */
+export function shouldNotifyDelegator(done: AgentMessage): boolean {
+  if (done.from_agent === done.to_agent) return false
+  if (done.content.startsWith('[Eredmény]')) return false
+  return isKnownAgent(done.from_agent)
+}
+
 export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, url } = ctx
 
@@ -193,12 +218,15 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
         closeOtelSpan(done.trace_id, done.span_id, Date.now(), newStatus === 'done' ? 'ok' : 'error')
       }
       // Notify the delegator: create a reverse message from executor → delegator so
-      // they learn the result without polling. Use a sentinel prefix to break
-      // ping-pong chains (the delegator might write back, which would trigger
-      // markMessageDone on this notification; we skip creating ANOTHER notification
-      // when the original content is already a completion report).
-      if (done && done.from_agent !== done.to_agent && !done.content.startsWith(COMPLETION_REPORT_PREFIX)) {
-        const summary = result ? result.slice(0, 500) : '(nincs eredmény)'
+      // they learn the result without polling. The full rule lives in
+      // shouldNotifyDelegator() so it can be measured without driving the route.
+      if (done && shouldNotifyDelegator(done)) {
+        // A vagas NE legyen nema: ha a result hosszabb, a cimzett lassa hogy van meg, es hol.
+        const summary = result
+          ? (result.length > 500
+              ? result.slice(0, 500) + `\n... [levágva, teljes szöveg: msg ${id} result mezője]`
+              : result)
+          : '(nincs eredmény)'
         createAgentMessage(
           done.to_agent,
           done.from_agent,
