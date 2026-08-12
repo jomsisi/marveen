@@ -44,6 +44,36 @@ export function shouldNotifyDelegator(done: AgentMessage): boolean {
   return isKnownAgent(done.from_agent)
 }
 
+/**
+ * How much of a `result` travels inside the completion notification, and what the recipient
+ * is told about the rest.
+ *
+ * WHY THIS IS NOT COSMETIC (measured twice on 2026-08-12): the notification carried the first
+ * 500 characters and then said "the full text is in msg N's result field". Both times the cut
+ * landed mid-argument -- once on a review condition, once on the numbers that decided whether a
+ * filter was safe -- and both times the recipient could only ask for a resend, because the
+ * pointer named a FIELD, not a way to read it. A pointer the consumer cannot follow is the same
+ * as no pointer: the sender ends up retyping, which is exactly what the notification was for.
+ *
+ * TWO CHANGES, AND THE SECOND MATTERS MORE. The cap is 2000, because our results routinely
+ * carry a measurement plus its interpretation and 500 truncates that mid-sentence. And the
+ * marker now names the EXACT command, so following it is one step, not a research task.
+ *
+ * The cap stays FINITE on purpose: the notification is injected into a live session, and an
+ * unbounded paste there costs context that the recipient did not choose to spend.
+ */
+export const RESULT_NOTIFY_MAX = 2000
+
+export function resultSummary(id: number, result: string | undefined | null): string {
+  if (!result) return '(nincs eredmény)'
+  if (result.length <= RESULT_NOTIFY_MAX) return result
+  const maradt = result.length - RESULT_NOTIFY_MAX
+  return (
+    result.slice(0, RESULT_NOTIFY_MAX) +
+    `\n... [levágva, még ${maradt} karakter. A TELJES szöveg: bash scripts/agent-msg-get.sh ${id}]`
+  )
+}
+
 export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, url } = ctx
 
@@ -202,6 +232,15 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   }
 
   const msgUpdateMatch = path.match(/^\/api\/messages\/(\d+)$/)
+  // EGY uzenet a TELJES tartalmaval -- ezt nevezi meg a levagott ertesites markere.
+  // A lista-vegpont csak agens szerint kerdezheto, tehat egy `msg N` hivatkozast eddig
+  // nem lehetett egy lepesben kovetni.
+  if (msgUpdateMatch && method === 'GET') {
+    const one = getAgentMessage(parseInt(msgUpdateMatch[1], 10))
+    if (!one) { json(res, { error: 'Message not found' }, 404); return true }
+    json(res, one)
+    return true
+  }
   if (msgUpdateMatch && method === 'PUT') {
     const id = parseInt(msgUpdateMatch[1], 10)
     const body = await readBody(req)
@@ -221,12 +260,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       // they learn the result without polling. The full rule lives in
       // shouldNotifyDelegator() so it can be measured without driving the route.
       if (done && shouldNotifyDelegator(done)) {
-        // A vagas NE legyen nema: ha a result hosszabb, a cimzett lassa hogy van meg, es hol.
-        const summary = result
-          ? (result.length > 500
-              ? result.slice(0, 500) + `\n... [levágva, teljes szöveg: msg ${id} result mezője]`
-              : result)
-          : '(nincs eredmény)'
+        // A vagas NE legyen nema, ES legyen KOVETHETO: lasd resultSummary().
+        const summary = resultSummary(id, result)
         createAgentMessage(
           done.to_agent,
           done.from_agent,
