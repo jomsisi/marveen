@@ -8,6 +8,14 @@ __pycache__/
 
 # Secrets & personal data
 .env
+# A puszta ".env" NEM fedi a szarmazekokat, es azokban ugyanaz a titok all:
+#  - .env-wm / .env-unas: a vault-resolve kimenete, amit a scriptek forrasolnak, majd torolnek.
+#    Ha egy futas megszakad az "rm -f" elott, a fajl ottmarad, es egy "git add -A" becommitolna.
+#  - .env.bak.*: kezi mentesek atallas elott (harom ilyen all a munkafaban).
+# A kotojeles alak kulon minta kell: a ".env.*" NEM illeszkedik a ".env-unas"-ra.
+.env-*
+.env.*
+!.env.example
 store/
 workspace/
 agents/
@@ -92,3 +100,26 @@ __pycache__/
 # Claude Code Channels runtime config/session dir (sessions, history, tokens,
 # plugins, skills). Per-install runtime state -- never source, never commit.
 .channels-config/
+
+# Broken .git set aside during the 2026-08-02 objects-store recovery.
+.git.broken-*/
+
+# UZEMI SZKRIPTEK -- EZ A REPO PUBLIKUS, EZEK PEDIG EGY KONKRET UZEMELTETO
+# RENDSZEREIROL SZOLNAK (2026-08-17, Zsolt dontese).
+#
+# MIERT IGNORALT ES NEM CSAK KOVETETLEN: a kovetetlen fajlt egyetlen `git add -A`
+# bevinne, es a kovetkezo push mar kiviszi. Az ignoralas az, ami VED; a "majd
+# figyelunk ra" nem szabaly, hanem szandek.
+#
+# EZEK A FAJLOK NEM KOLTOZNEK EL a helyukrol: utemezett feladatok es skillek
+# hivatkoznak rajuk `scripts/...` utvonalon, es egy koltoztetes csendben eltorne
+# oket. Verziokezelesuk egy KULON, SOHA NEM PUSHOLT repoban van (lasd
+# /root/uzemi-repo.git, work-tree ez a konyvtar -- a marveen fan KIVUL, hogy a fo repo
+# egyetlen muvelete se erhesse el).
+#
+# Ha ide uj fajl kerul, kerdezd meg: mas telepitesnek is hasznos-e (termek), vagy
+# CSAK errol az uzemeltetorol szol (uzemi)? A masodikat ide kell felvenni.
+scripts/tuya-cloud.py
+scripts/voice-bridge.py
+scripts/browser/kupon-szamla-letoltes.mjs
+scripts/browser/webmail-verify-sent.mjs
