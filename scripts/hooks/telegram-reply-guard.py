@@ -37,6 +37,30 @@ import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_lib  # noqa: E402
 
+# NAPLO -- MERT A NEMA OR NEM MERHETO (2026-08-24, michel jelzese nyoman).
+#
+# A TESTVER-OR (`scripts/channel-reply-guard.sh`) 2026-08-21 ota naploz, ez a fajl NEM -- pedig
+# ugyanarra a szabalyra vigyaz, csak mas agenseknel es mas adatbol (ledger vs transcript). A
+# kovetkezmeny meressel kimutathato volt: a `.tg-reply-guard-*` allapotfajl CSAK blokkolaskor
+# keletkezik, es EGY SEM letezett -- amibol ket teljesen kulonbozo dolog kovetkezhet, es kivulrol
+# semmi nem valasztotta szet oket:
+#     (a) az or fut, es helyesen SOHA nem kellett blokkolnia (747 bejovo uzenetnel),
+#     (b) az or NEM fut egyaltalan.
+# Ez a naplo teszi a kerdest eldonthetove. A naplozas SOHA nem akadalyozhatja meg a hookot.
+import datetime as _dt
+
+NAPLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "store",
+                     "telegram-reply-guard.log")
+
+
+def naploz(dontes, ok=""):
+    try:
+        with open(os.path.abspath(NAPLO), "a", encoding="utf-8") as f:
+            f.write(f"{_dt.datetime.now().isoformat(timespec='seconds')}\t{dontes}\t{ok}\n")
+    except Exception:
+        pass
+
+
 # Tunables (overridable via env for tests / ops).
 STALE_SECONDS = int(os.environ.get("TG_GUARD_STALE_SECONDS", "1800"))  # 30 min
 MAX_BLOCKS = int(os.environ.get("TG_GUARD_MAX_BLOCKS", "3"))
@@ -105,27 +129,40 @@ def main():
     try:
         oq = ledger_lib.open_question_with_age(agent_id)
     except Exception:
+        naploz("ATENGED", f"{agent_id}: ledger nem elerheto")
         sys.exit(0)  # ledger unavailable -> never wedge the stop
     if not oq:
+        naploz("ATENGED", f"{agent_id}: nincs nyitott kerdes")
         sys.exit(0)  # nothing open, or already answered by a reply-tool call
 
-    chat_id, message_id, text, ts, created_at = oq
+    # HET ertek jon vissza, nem ot -- a ket csatolmany-mezo (`attachment_kind`, `attachment_file_id`)
+    # kesobb kerult a `ledger_lib.open_question_with_age()` visszateresebe, es ez a kicsomagolas
+    # NEM kovette. Kimerve 2026-08-24: a BLOKKOLO ag `ValueError: too many values to unpack`-kel
+    # elszallt, tehat AZ OR SOHA NEM TUDOTT BLOKKOLNI. Nem hibauzenetkent latszott, hanem
+    # SEMMIKENT: az ATENGED-agak (nincs nyitott kerdes, nyugta, tul regi) sosem ertek el idaig,
+    # es a hook csendben kilepett. Naplo nelkul ez kivulrol megkulonboztethetetlen volt attol,
+    # hogy az or fut es helyesen hallgat.
+    chat_id, message_id, text, ts, created_at, _att_kind, _att_file_id = oq
 
     # Pure acknowledgement -> no reply owed.
     if _is_ack(text):
+        naploz("ATENGED", f"{agent_id}: nyugta, nem igenyel valaszt")
         sys.exit(0)
 
     # Too old -> don't nag forever (abandoned / deliberately-unanswered message).
     try:
         if created_at is not None and (int(time.time()) - int(created_at)) > STALE_SECONDS:
+            naploz("ATENGED", f"{agent_id}: a nyitott kerdes regebbi {STALE_SECONDS}s-nal")
             sys.exit(0)
     except Exception:
+        naploz("ATENGED", f"{agent_id}: kor-ellenorzes hibara futott")
         sys.exit(0)
 
     # Hard backstop against an infinite block loop.
     path = _statefile(agent_id)
     count = _block_count(path, message_id)
     if count >= MAX_BLOCKS:
+        naploz("ATENGED", f"{agent_id}: mar {count}x blokkolt erre az uzenetre (backstop)")
         sys.exit(0)
 
     _record_block(path, message_id, count + 1)
@@ -143,6 +180,7 @@ def main():
         f"utána zárhatod a fordulót."
     )
     print(json.dumps({"decision": "block", "reason": reason}))
+    naploz("BLOKKOL", f"{agent_id}: valaszolatlan uzenet (message_id={message_id})")
     sys.exit(0)
 
 
