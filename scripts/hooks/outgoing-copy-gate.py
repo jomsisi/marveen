@@ -236,9 +236,29 @@ TECHNICAL = re.compile(
       | \b\w+(?:_\w+)+\b            # snake_case azonosito
       | \b\w+\.[A-Za-z]{2,10}\b     # fajlnev / domain (video.mp4, marveen.io)
       | \b[\w-]*/[\w/-]+            # utvonal / slug
+      | \b\d+[-\u2011][a-zA-Z\u00c0-\u017f]{1,4}\b  # SZAM + KOTOJEL + TOLDALEK (106-ot, 5-ot, 20-as)
+      | \b\d+(?:[.,]\d+)?\s?(?:MB|GB|KB|TB|Ft|db|kg|km|cm|mm|%)[-\u2011][a-zA-Z\u00c0-\u017f]{1,4}\b  # SZAM + EGYSEG + TOLDALEK (127 MB-ot, 3 GB-ot)
     """,
     re.X,
 )
+
+# A SZAM-TOLDALEK AZERT KERULT IDE (merve 2026-08-25, KETSZER egy oran belul): a `106-ot`
+# helyes magyar toldalekolas, a `WORD` mintaja viszont a kotojelnel vag, tehat `ot`-kent
+# marad a szolistaban -- es az `ot` benne van az ekezet-szotarban (`ot -> ot`). A kapu ezert
+# KET helyes Telegram-uzenetet blokkolt, mindketto ugyanazon a szon. Ez HAMIS POZITIV: egy
+# szamhoz tapado toldalek definicio szerint nem ekezet-hiba.
+# A KIZARAS SZUK: legfeljebb 4 betus toldalek KOZVETLENUL szam es kotojel utan. Egy valodi
+# ekezet-hiba (`ot ember`) tovabbra is fennakad, mert nincs elotte `<szam>-`.
+#
+# AZ EGYSEGES ALAK 2026-09-01-EN KERULT MELLE, UGYANEZ A HIBA MASIK HELYESIRASSAL: a kapu
+# blokkolta a havi postafiok-jelentesemet a `127 MB-ot` miatt. A szobonto a kotojelnel vag,
+# tehat itt is `ot` marad a listaban -- de a SZAM mar nem all KOZVETLENUL a kotojel elott,
+# ezert a fenti sor nem fogta. Ugyanaz az osztaly, uj alak (`3 GB-ot`, `500 Ft-ot`, `20 %-ot`).
+# A KIZARAS ITT IS SZUK, ES SZANDEKOSAN KOTELEZO HOZZA A SZAM: a `MB-ot mer` (szam nelkul)
+# tovabbra is FENNAKAD, es a nagybetus roviditesek toldalekja altalaban (`UNAS-tol`) sincs
+# maszkolva -- ott a hianyzo ekezet valodi hiba lenne.
+# MERVE mindket iranyban (lasd a lap aljan a kontroll-esetek listajat): a `127 MB-ot` es a
+# `3 GB-ot` atmegy, az `Ot ember`, a `MB-ot mer` es a `Tobb level` tovabbra is blokkol.
 
 
 def strip_technical(text: str) -> str:
