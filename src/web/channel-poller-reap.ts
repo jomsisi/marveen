@@ -46,6 +46,39 @@ const STATE_ENV_VAR: Record<ChannelProviderType, string> = {
 // `TELEGRAM_STATE_DIR=/path-elsewhere` is acceptable because the value is an
 // absolute path, but we still anchor on the env-var literal to avoid
 // matching a row that just *mentions* the path string in its argv.
+// The env-var match alone is NOT enough to identify a poller. Every process
+// spawned inside an agent session inherits <envVar>=<chanDir>: the agent's own
+// `claude` process, every Bash-tool child, every helper script. Reaping on the
+// env match alone therefore SIGKILLs the agent itself along with whatever work
+// it had in flight (found 2026-08-02 by michel, who ran the same scan against
+// his own state dir and got his claude pid + bash children back alongside the
+// two real pollers). Independent confirmation from the same day: a "Plugin-down
+// FORENSICS" log line reported envScanPids: [672722] -- that pid was the agent's
+// claude process, not a poller.
+//
+// So we additionally require the *argv* to look like a channel poller: a JS
+// runtime executing something out of the plugin cache. argv is the part of the
+// `ps eww` row between the TIME field and the first VAR=value env token.
+export function extractArgvFromPsRow(row: string): string | null {
+  // `PID TTY STAT TIME COMMAND...ENV...` on both Linux and macOS.
+  const m = row.match(/^\s*\d+\s+\S+\s+\S+\s+\d+:[\d.:]+\s+(.*)$/)
+  if (!m) return null
+  const rest = m[1]!
+  // Env block starts at the first bare VAR=value token.
+  const envStart = rest.search(/(^|\s)[A-Za-z_][A-Za-z0-9_]*=/)
+  return (envStart === -1 ? rest : rest.slice(0, envStart)).trim()
+}
+
+export function isPollerArgv(argv: string): boolean {
+  if (!argv) return false
+  // Never reap the agent itself or a shell, whatever else the row looks like.
+  if (/(^|\/)claude(\s|$)/.test(argv)) return false
+  if (/(^|\/)(ba|z|k|da)?sh(\s|$)/.test(argv)) return false
+  const runtime = /(^|\/)(bun|node|deno)(\s|$)/.test(argv)
+  const pluginish = argv.includes('/plugins/') || /\bserver\.(ts|js|mjs|cjs)(\s|$)/.test(argv)
+  return runtime && pluginish
+}
+
 export function parsePollerPidsFromPs(
   psOutput: string,
   envVar: string,
@@ -58,7 +91,10 @@ export function parsePollerPidsFromPs(
     const m = line.match(/^\s*(\d+)\s/)
     if (!m) continue
     const pid = parseInt(m[1]!, 10)
-    if (pid > 1) out.push(pid)
+    if (pid <= 1) continue
+    const argv = extractArgvFromPsRow(line)
+    if (!argv || !isPollerArgv(argv)) continue
+    out.push(pid)
   }
   return out
 }
@@ -153,6 +189,15 @@ export function buildPollerEvidence(
 
   const candidates = new Set<number>(envScanPids)
   if (botPid != null) candidates.add(botPid)
+  // The agent's own claude process inherits <envVar>=<chanDir>, so an unfiltered
+  // env scan hands it to us as a "poller". isUnderClaude(claudePid) is trivially
+  // true, which flipped the verdict to 'in-tree' -- "a live poller IS in the
+  // claude tree, the probe is wrong, not the plugin" -- at the exact moment the
+  // plugin really had died (observed 2026-08-02 13:57 for agent michel, logged as
+  // envScanPids: [672722], a claude pid). parsePollerPidsFromPs now type-checks
+  // argv so this should never arrive, but the verdict is too consequential to
+  // depend on the caller: a wrong 'in-tree' hides a genuinely dead plugin.
+  candidates.delete(claudePid)
 
   const rows: PollerEvidenceRow[] = []
   for (const pid of candidates) {

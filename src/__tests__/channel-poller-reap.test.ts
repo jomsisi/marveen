@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parsePollerPidsFromPs, findOrphanChannelClaudes, type ProcRow } from '../web/channel-poller-reap.js'
+import { parsePollerPidsFromPs, findOrphanChannelClaudes, buildPollerEvidence, type ProcRow } from '../web/channel-poller-reap.js'
 
 // Sample rows captured from a real `ps eww -e` on macOS during the
 // 2026-06-01 channel-disconnect incident. The bun poller, the slack
@@ -64,6 +64,37 @@ describe('parsePollerPidsFromPs', () => {
       '/Users/x/ClaudeClaw/.claude/channels/telegram',
     )
     expect(pids).toEqual([29932, 91234])
+  })
+
+  // Regression, 2026-08-02: every process inside an agent session INHERITS
+  // TELEGRAM_STATE_DIR -- the agent's own `claude`, its Bash-tool children,
+  // helper scripts. Before the argv type-check, the reaper matched all of them
+  // and SIGKILLed the agent along with its in-flight work.
+  const AGENT_SESSION_SAMPLE = [
+    ' 1146178 pts/9  Sl+  0:42 /root/.local/bin/claude --dangerously-skip-permissions --model claude-opus-5 --channels plugin:telegram@claude-plugins-official HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
+    ' 1146213 pts/9  Sl+  0:01 bun run --cwd /root/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 --shell=bun --silent start HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
+    ' 1146218 pts/9  Sl+  0:05 /root/.bun/bin/bun server.ts HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
+    ' 1151730 pts/9  S    0:00 /usr/bin/bash -c source /root/.claude/shell-snapshots/snapshot-bash-123.sh && sqlite3 store/claudeclaw.db HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
+  ].join('\n')
+
+  it('reaps ONLY the pollers, never the agent claude process or its bash children', () => {
+    const pids = parsePollerPidsFromPs(
+      AGENT_SESSION_SAMPLE,
+      'TELEGRAM_STATE_DIR',
+      '/srv/app/agents/michel/.claude/channels/telegram',
+    )
+    expect(pids).toEqual([1146213, 1146218])
+    expect(pids).not.toContain(1146178) // the agent itself
+    expect(pids).not.toContain(1151730) // a Bash tool child
+  })
+
+  it('fails closed when the row is truncated past the argv', () => {
+    // A truncated row loses the plugin marker; the correct bias is to skip the
+    // pid rather than kill something we could not identify.
+    const truncated = ' 1146218 pts/9  Sl+  0:05 /root/.bun/bin/b TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram'
+    expect(
+      parsePollerPidsFromPs(truncated, 'TELEGRAM_STATE_DIR', '/srv/app/agents/michel/.claude/channels/telegram'),
+    ).toEqual([])
   })
 
   it('ignores rows where the path appears only in argv (not as an env-var value)', () => {
@@ -147,5 +178,29 @@ describe('findOrphanChannelClaudes', () => {
       { pid: 76621, ppid: 35874, command: `${CLAUDE} --channels plugin:telegram@claude-plugins-official` },
     ]
     expect(findOrphanChannelClaudes(allLive, new Set([76621]))).toEqual([])
+  })
+})
+
+// Regression, 2026-08-02: an unfiltered env scan hands the agent's own claude
+// pid back as a "poller". isUnderClaude(claudePid) is trivially true, so the
+// verdict flipped to 'in-tree' ("the probe is wrong, not the plugin") at the
+// exact moment the plugin had really died. The dead plugin then went
+// undiagnosed. buildPollerEvidence must drop the claude pid itself.
+describe('buildPollerEvidence: the claude pid is never its own poller', () => {
+  it('reports no-poller when the only env-scan hit is the agent claude process', () => {
+    const procs: ProcRow[] = [{ pid: 672722, ppid: 12548, command: '/root/.local/bin/claude --channels plugin:telegram@claude-plugins-official' }]
+    const ev = buildPollerEvidence(procs, null, [672722], 672722)
+    expect(ev.interpretation).toBe('no-poller')
+    expect(ev.rows).toEqual([])
+  })
+
+  it('still reports in-tree when a REAL poller is under claude', () => {
+    const procs: ProcRow[] = [
+      { pid: 672722, ppid: 12548, command: '/root/.local/bin/claude --channels plugin:telegram@claude-plugins-official' },
+      { pid: 672900, ppid: 672722, command: '/root/.bun/bin/bun server.ts' },
+    ]
+    const ev = buildPollerEvidence(procs, null, [672722, 672900], 672722)
+    expect(ev.interpretation).toBe('in-tree')
+    expect(ev.rows.map((r) => r.pid)).toEqual([672900])
   })
 })
