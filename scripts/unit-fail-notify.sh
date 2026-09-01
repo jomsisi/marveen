@@ -27,10 +27,21 @@ if [[ -f "$ENV_FILE" ]]; then
   token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' \r\n')"
 fi
 if [[ -n "$token" && -n "$CHAT_ID" ]]; then
-  curl -s --max-time 15 \
+  # KET HIBA VOLT EBBEN AZ AGBAN, es egyik sem hibauzenetkent jelentkezett:
+  #  1. a sikeres ag NYOMTALAN volt -- egy tiszta lefutas es egy elnyelt hiba
+  #     kivulrol EGYFORMA (csend), tehat a naplobol nem lehetett eldonteni,
+  #     ment-e ki barmi;
+  #  2. a `|| true` mellett a curl exit-kodja amugy sem meres: 0 akkor is, ha a
+  #     Telegram ELUTASITOTTA a kerest. Az egyetlen bizonyitek az `"ok":true`.
+  resp="$(curl -s --max-time 15 \
     "https://api.telegram.org/bot${token}/sendMessage" \
     --data-urlencode "chat_id=${CHAT_ID}" \
-    --data-urlencode "text=${msg}" >/dev/null 2>&1 || true
+    --data-urlencode "text=${msg}" 2>/dev/null)"
+  if [[ "$resp" == *'"ok":true'* ]]; then
+    echo "[unit-fail-notify] ${UNIT}: Telegram sent (ok=true)" >&2
+  else
+    echo "[unit-fail-notify] ${UNIT}: Telegram send FAILED -- a valasz: ${resp:-<ures: nincs HTTP valasz>}" >&2
+  fi
 else
   # Not silent: name the missing piece so a misconfigured install is diagnosable.
   miss=""; [[ -z "$token" ]] && miss+=" TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV=$ENV_FILE)"; [[ -z "$CHAT_ID" ]] && miss+=" MARVEEN_ALERT_CHAT_ID"
