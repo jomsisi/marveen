@@ -65,7 +65,7 @@ index_skills_dir() {
     fi
 
     local desc
-    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | cut -c1-120)
+    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | cut -c1-120 | iconv -c -f UTF-8 -t UTF-8)
     if [ -z "$desc" ]; then
       desc="(nincs leírás)"
     fi
