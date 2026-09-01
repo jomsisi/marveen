@@ -532,6 +532,20 @@ async function main(): Promise<void> {
   // dead-token incidents).
   renameSharedCredentialsIfSafe()
 
+  // DO NOT add a periodic re-run of the guard here. Tried on 2026-08-02 (a
+  // 2-minute sweep, to catch a credentials.json recreated by an interactive
+  // `/login`) and it was strictly harmful: it retired the file within two
+  // minutes of every login, so the operator was asked to log in again, and
+  // again -- five times in one afternoon. "Mindig lelovod magad." The guard is
+  // safe exactly BECAUSE it only runs at boot and at agent launch: a session
+  // that is already up keeps whatever auth it started with, and the operator's
+  // fresh login survives until the next restart.
+  //
+  // Measured the same day: a NEW `claude -p` with CLAUDE_CODE_OAUTH_TOKEN set
+  // and no credentials.json authenticates fine, so the boot-time rename is
+  // sound. The failure mode is entirely about yanking the file out from under
+  // a LIVE session.
+
   // Fleet-token boot pass, DEFERRED and fire-and-forget: it live-probes a
   // credential (one real `claude -p` call, up to 60s) so it must never block
   // boot. Backfills store/.claude-oauth-token from a terminal-pasted
