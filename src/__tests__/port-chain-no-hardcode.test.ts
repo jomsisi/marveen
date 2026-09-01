@@ -156,6 +156,24 @@ describe('PORTCHAIN1: the port chain follows WEB_PORT on a NON-default port', ()
     const box = makeInstall(port)
     try {
       cpSync(join(ROOT, script), join(box, script))
+      // RESOLUTION FIRST, SEND SECOND, AND THE ORDER IS THE POINT. If the
+      // resolution regresses, the helper falls back to 3420 -- which on a
+      // developer's machine is a LIVE dashboard. Checking the resolved value
+      // before running the helper means a regression fails here, without a
+      // request leaving for someone else's service. (Even then it could not
+      // authenticate anywhere: all three helpers read the token from
+      // $BASE/store/.dashboard-token, i.e. from this throwaway box, never from
+      // the environment.) The send still has to happen afterwards: this file
+      // already learned that asserting the idiom alone lets a restored literal
+      // at the CALL SITE pass.
+      const idiom = readFileSync(join(box, script), 'utf-8')
+        .split('\n').filter((l) => l.startsWith('PORT=')).join('\n')
+      expect(idiom, `${script}: no PORT resolution found`).not.toBe('')
+      const resolved = execFileSync('bash', ['-c', `BASE='${box}'\n${idiom}\necho "$PORT"`], {
+        encoding: 'utf-8',
+      }).trim()
+      expect(resolved, `${script}: resolved ${resolved}, not the .env port ${port}`).toBe(port)
+
       // ASYNC on purpose: execFileSync would block this thread, and the listener
       // above runs on it -- the helper would wait for a response that cannot be
       // written until the helper returns.
