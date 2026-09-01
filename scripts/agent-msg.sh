@@ -23,12 +23,22 @@
 # and "0" are indistinguishable to this script. Refusing the argument form is the only check that acts
 # before the shell touches the text. A quoted heredoc (<<'EOF') passes every byte through verbatim.
 # Output: success -> "OK id=<n>"; failure -> "FAIL <reason>" + a line in store/agent-msg-failures.log, exit 1.
-# Env: MARVEEN_WEB_PORT (default 3420).
+# Env: MARVEEN_WEB_PORT overrides the port; otherwise WEB_PORT is read from the install's .env
+# (default 3420) -- the same file and key the server itself resolves the port from.
 set -uo pipefail
 
 # base dir = the parent of this script's dir (scripts/..), so it works from any CWD / any install
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${MARVEEN_WEB_PORT:-3420}"
+# THE PORT COMES FROM THE SAME .env THE SERVER READS. `MARVEEN_WEB_PORT` used to be the only
+# source and NOTHING in the product ever set it: config.ts resolves the port from WEB_PORT in
+# the .env file, so the two names never met and `:-3420` was not a fallback but the ONLY branch
+# that ever ran. On an install with a non-default WEB_PORT an agent's READS went to the right
+# port (they carry dashboardOrigin) while its WRITES came through here, to 3420. Invisible on an
+# install that happens to use 3420, because then the two separate values agree by coincidence.
+# Resolution order matches watchdog.sh / set-bot-menu.sh / pre-pr-review.sh: an explicit env
+# override, then the .env, then the documented default.
+PORT="${MARVEEN_WEB_PORT:-$(grep -E '^WEB_PORT=' "$BASE/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' "')}"
+PORT="${PORT:-3420}"
 TOKEN_FILE="$BASE/store/.dashboard-token"
 URL="http://localhost:${PORT}/api/messages"
 LOG="$BASE/store/agent-msg-failures.log"

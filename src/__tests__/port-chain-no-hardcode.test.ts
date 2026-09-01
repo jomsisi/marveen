@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execFile } from 'node:child_process'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, cpSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -104,10 +106,12 @@ describe('PORTCHAIN1: the port chain follows WEB_PORT on a NON-default port', ()
       ownerName: 'Owner', webPort: Number(PORT),
     })
     expect(rendered).not.toContain('3420')
-    expect(rendered).toContain(`localhost:${PORT}/api/memories`)
-    expect(rendered).toContain(`localhost:${PORT}/api/daily-log`)
-    expect(rendered).toContain(`localhost:${PORT}/api/agent-taskstate`)
     expect(() => JSON.parse(rendered)).not.toThrow()
+    // The write examples no longer carry a URL at all: they go through
+    // scripts/dash-api.sh. Asserting the helper's NAME here would say nothing
+    // about the port, so the chain is measured where it now runs -- see the
+    // block below, which executes the helpers against a real listener.
+    expect(rendered).toContain('bash scripts/dash-api.sh')
   })
 
   it('channel-monitor builds its agent instruction from WEB_PORT', () => {
@@ -115,6 +119,63 @@ describe('PORTCHAIN1: the port chain follows WEB_PORT on a NON-default port', ()
     expect(src).toContain("import { WEB_PORT } from '../config.js'")
     expect(src).toMatch(/localhost:\$\{WEB_PORT\}\/api\/memories/)
     expect(src).not.toMatch(/localhost:3420/)
+  })
+
+  // --- the helpers the agent instructions now point at ---------------------
+  //
+  // Moving the writes from a curl example to a helper MOVED the port chain
+  // rather than removing it, and the move is exactly where it broke: the
+  // helpers resolved the port from MARVEEN_WEB_PORT, a name NOTHING in the
+  // product ever sets, while config.ts resolves WEB_PORT from the .env. The
+  // two never met, so `:-3420` was not a fallback but the only branch that
+  // ever ran -- an install on any other port had its agents reading from the
+  // right port and writing to 3420. Invisible on 3420, where the two separate
+  // values agree by coincidence.
+  //
+  // So this does not assert a string. It stands up a listener on a
+  // non-default port, points a throwaway install's .env at it, and runs the
+  // helper for real: the request either arrives on that port or it does not.
+
+  it.each([
+    ['scripts/dash-api.sh', ['POST', '/api/daily-log'], '{"agent_id":"a","content":"x"}'],
+    ['scripts/agent-msg.sh', ['a', 'b', '-'], 'hello'],
+    ['scripts/agent-msg-close.sh', ['1', 'done', '-'], 'result text'],
+  ] as const)('%s sends to the port from .env, not 3420', async (script, args, stdin) => {
+    const hits: string[] = []
+    const server = createServer((req, res) => {
+      hits.push(req.url ?? '')
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        // agent-msg.sh only counts a send as done when an id comes back.
+        res.end(JSON.stringify({ id: 1, status: 'pending' }))
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = String((server.address() as AddressInfo).port)
+    const box = makeInstall(port)
+    try {
+      cpSync(join(ROOT, script), join(box, script))
+      // ASYNC on purpose: execFileSync would block this thread, and the listener
+      // above runs on it -- the helper would wait for a response that cannot be
+      // written until the helper returns.
+      await new Promise<void>((resolve, reject) => {
+        const child = execFile('bash', [join(box, script), ...args], (err) => (err ? reject(err) : resolve()))
+        child.stdin?.end(stdin)
+      })
+      expect(hits.length, `${script}: nothing arrived on port ${port}`).toBeGreaterThan(0)
+    } finally {
+      rmSync(box, { recursive: true, force: true })
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('the helpers carry no literal 3420 as their only port source', () => {
+    for (const script of ['scripts/dash-api.sh', 'scripts/agent-msg.sh', 'scripts/agent-msg-close.sh']) {
+      const src = readFileSync(join(ROOT, script), 'utf-8')
+      // The default may stay as a last resort, but a .env read must precede it.
+      expect(src, `${script}: no .env WEB_PORT read`).toContain("grep -E '^WEB_PORT=' \"$BASE/.env\"")
+    }
   })
 
   // --- the egress allowlist ------------------------------------------------

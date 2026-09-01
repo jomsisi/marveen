@@ -118,8 +118,12 @@ describe('ensureAutonomySection', () => {
     const level2Idx = result.indexOf('Level 2')
     const level1Block = result.slice(level1Idx, level2Idx)
     expect(level1Block).not.toContain('/api/approvals')
-    // Level 1 must have inter-agent message and MEGÁLL
-    expect(level1Block).toContain('/api/messages')
+    // Level 1 must send an inter-agent message TO THE MAIN AGENT and then stop.
+    // The send moved from a raw /api/messages curl to the helper, so the anchor
+    // is the routing itself (helper + target id), not the endpoint string: the
+    // endpoint no longer appears, and asserting the helper's bare name would say
+    // nothing about where the notice goes.
+    expect(level1Block).toMatch(/agent-msg\.sh \S+ \S+ -/)
     expect(level1Block).toContain('ÁLLJ MEG')
   })
 

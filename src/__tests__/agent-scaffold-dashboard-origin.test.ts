@@ -91,16 +91,26 @@ describe('generateClaudeMd prompt: no hardcoded localhost:3420', () => {
     expect(fnBody).toContain('${dashboardOrigin}/api/memories')
   })
 
-  it('references dashboardOrigin in the daily-log API curl example', () => {
-    expect(fnBody).toContain('${dashboardOrigin}/api/daily-log')
+  // THE WRITES NO LONGER CARRY A URL, AND THAT IS THE POINT OF THESE THREE.
+  // daily-log, schedules and messages went through the helpers, so
+  // `${dashboardOrigin}/api/daily-log` is simply gone from the prompt. The
+  // invariant these tests protect -- an agent must not be handed a fixed port --
+  // did not go away with it: it MOVED into the helper, which resolves the port
+  // from the install's .env. That half is measured end-to-end in
+  // port-chain-no-hardcode.test.ts, by running the helper against a listener on
+  // a non-default port. Here we only pin that the write goes through the helper
+  // rather than being rebuilt as a literal curl, which is what would silently
+  // reintroduce a hardcoded port.
+  it.each([
+    ['daily-log', '/api/daily-log'],
+    ['schedules', '/api/schedules'],
+  ])('routes the %s write through dash-api.sh, not a rebuilt curl', (_label, path) => {
+    expect(fnBody).toContain(`bash scripts/dash-api.sh POST ${path}`)
+    expect(fnBody).not.toContain(`-X POST http://localhost:3420${path}`)
   })
 
-  it('references dashboardOrigin in the schedules API curl example', () => {
-    expect(fnBody).toContain('${dashboardOrigin}/api/schedules')
-  })
-
-  it('references dashboardOrigin in the inter-agent messages API curl example', () => {
-    expect(fnBody).toContain('${dashboardOrigin}/api/messages')
+  it('routes the inter-agent message through agent-msg.sh with both endpoints named', () => {
+    expect(fnBody).toMatch(/agent-msg\.sh \S+ \S+ -/)
   })
 
   it('defines dashboardOrigin using resolveDashboardOrigin', () => {
@@ -124,16 +134,18 @@ describe('renderHeartbeatClaudeMd: respects dashboardOrigin', () => {
     calendarAccount: '',
   }
 
+  // The messages endpoint moved to the helper, so the origin is asserted on an
+  // endpoint the heartbeat prompt still calls by URL. Same invariant, live anchor.
   it('uses a public URL when dashboardOrigin is set to one', () => {
     const id: HeartbeatIdentity = { ...BASE, dashboardOrigin: 'https://marveen.example.com' }
     const out = renderHeartbeatClaudeMd(id)
-    expect(out).toContain('https://marveen.example.com/api/messages')
-    expect(out).not.toContain('http://localhost:3420/api/messages')
+    expect(out).toContain('https://marveen.example.com/api/schedules')
+    expect(out).not.toContain('http://localhost:3420/api/schedules')
   })
 
   it('falls back to localhost when dashboardOrigin is the localhost default', () => {
     const out = renderHeartbeatClaudeMd(BASE)
-    expect(out).toContain('http://localhost:3420/api/messages')
+    expect(out).toContain('http://localhost:3420/api/schedules')
   })
 
   it('emits no hardcoded hostname other than the dashboardOrigin host', () => {

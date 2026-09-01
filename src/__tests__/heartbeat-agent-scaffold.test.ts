@@ -31,9 +31,11 @@ describe('renderHeartbeatClaudeMd', () => {
 
   it('routes the inter-agent message to the main agent id', () => {
     const out = renderHeartbeatClaudeMd(ID)
-    expect(out).toContain('"to":"helios"')
-    // The sender is always the fixed heartbeat agent id.
-    expect(out).toContain('"from":"heartbeat"')
+    // The send moved from a JSON curl payload to the helper, so the routing is
+    // asserted on the helper's two positional arguments instead of on
+    // `"to":"helios"`. Both halves still matter: the sender is always the fixed
+    // heartbeat id, the target follows the identity.
+    expect(out).toContain('agent-msg.sh heartbeat helios -')
   })
 
   it('uses the supplied store dir (absolute) for the DB and token paths', () => {
@@ -42,9 +44,14 @@ describe('renderHeartbeatClaudeMd', () => {
     expect(out).toContain('cat /srv/app/store/.dashboard-token')
   })
 
-  it('uses the supplied dashboard origin for the messages API', () => {
+  it('uses the supplied dashboard origin for the endpoints it still calls by URL', () => {
+    // The messages send goes through agent-msg.sh now (which resolves the port
+    // from the install's .env -- measured in port-chain-no-hardcode.test.ts).
+    // The origin is still handed to the endpoints the prompt curls directly, and
+    // that is where it has to be checked; the old anchor no longer exists.
     const out = renderHeartbeatClaudeMd(ID)
-    expect(out).toContain('http://localhost:3420/api/messages')
+    expect(out).toContain('http://localhost:3420/api/kanban/heartbeat-summary')
+    expect(out).toContain('http://localhost:3420/api/schedules')
   })
 
   it('targets the configured calendar account when one is set', () => {
@@ -124,9 +131,9 @@ describe('renderHeartbeatClaudeMd', () => {
     })
     expect(a).not.toBe(b)
     expect(b).toContain("across Omar's systems")
-    expect(b).toContain('"to":"atlas"')
+    expect(b).toContain('agent-msg.sh heartbeat atlas -')
     expect(b).toContain('/data/store/claudeclaw.db')
-    expect(b).toContain('http://localhost:9000/api/messages')
+    expect(b).toContain('http://localhost:9000/api/schedules')
   })
 
   // 2026-08-02 (HBTZ802). The first report after a fresh restart carried
