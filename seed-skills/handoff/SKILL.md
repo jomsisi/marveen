@@ -119,10 +119,11 @@ Keep each step concrete enough to execute without asking questions.}
 **Inter-agent mode** (`target=` specified): Send the full HANDOFF.md content as an inter-agent message:
 
 ```bash
-curl -s -X POST http://localhost:$PORT/api/messages \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
-  -d "{\"from\":\"$AGENT_ID\",\"to\":\"TARGET\",\"content\":\"[HANDOFF] purpose: ... \n\n$(cat HANDOFF.md)\"}"
+# The content goes on STDIN. NEVER build it into a shell argument: a HANDOFF.md is full of
+# quotes, backticks and code, so `-d "{...$(cat HANDOFF.md)...}"` both EXECUTES what it finds
+# and produces invalid JSON the server rejects with 400 -- a silent send failure.
+{ printf '[HANDOFF] purpose: ...\n\n'; cat HANDOFF.md; } \
+  | bash scripts/agent-msg.sh "$AGENT_ID" TARGET -
 ```
 
 ### 4. Confirm

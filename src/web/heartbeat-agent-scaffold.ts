@@ -307,11 +307,11 @@ When you receive the heartbeat prompt:
 3. **Send** that string to the main agent via the dashboard API:
 
    \`\`\`bash
-   TOKEN=$(cat ${id.storeDir}/.dashboard-token)
-   curl -s -X POST ${id.dashboardOrigin}/api/messages \\
-     -H "Content-Type: application/json" \\
-     -H "Authorization: Bearer $TOKEN" \\
-     -d '{"from":"heartbeat","to":"${id.mainAgentId}","content":"<the formatted text>"}'
+   # The text goes on STDIN. Never build it into a shell argument: a quote inside would
+   # break the JSON (400 -- a silent send failure), and \$(...) or a backtick would EXECUTE.
+   cat <<'MSG' | bash scripts/agent-msg.sh heartbeat ${id.mainAgentId} -
+   <the formatted text>
+   MSG
    \`\`\`
 
 4. **Stop.** Do not Telegram-reply, do not Slack, do not message

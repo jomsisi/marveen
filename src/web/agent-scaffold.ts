@@ -855,12 +855,16 @@ function buildAutonomyBody(name: string): string {
     'Az autonóm műveletek fokozatait a store/autonomy-config.json szabályozza (level: 1=csak jelez, 2=javasol+jóváhagyás, 3=autonóm+jelent). Mielőtt önállóan cselekszel, nézd meg az adott kategória szintjét.',
     '',
     '**Level 1 (csak jelez)**: küldj inter-agent értesítést a főágensnek, de NE végezd el a műveletet. Ezután ÁLLJ MEG.',
-    `curl -s -X POST ${dashboardOrigin}/api/messages -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d "{\\"from\\":\\"${name}\\",\\"to\\":\\"${MAIN_AGENT_ID}\\",\\"content\\":\\"[FELHÍVÁS] CATEGORY_KEY: MIT akartam elvégezni, de level 1 miatt csak jelzek.\\"}"`,
+    `cat <<'MSG' | bash scripts/agent-msg.sh ${name} ${MAIN_AGENT_ID} -`,
+    '[FELHÍVÁS] CATEGORY_KEY: MIT akartam elvégezni, de level 1 miatt csak jelzek.',
+    'MSG',
     '',
     '**Level 2 (jóváhagyás szükséges)**: kérj jóváhagyást az API-n MIELŐTT cselekszel.',
     '',
     'Jóváhagyás kérése (POST):',
-    `curl -s -X POST ${dashboardOrigin}/api/approvals -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d '{"agent_id":"${name}","category":"CATEGORY_KEY","action_description":"Mit tervezel elvégezni és miért","timeout_seconds":3600}'`,
+    `cat <<'JSON' | bash scripts/dash-api.sh POST /api/approvals`,
+    `{"agent_id":"${name}","category":"CATEGORY_KEY","action_description":"Mit tervezel elvégezni és miért","timeout_seconds":3600}`,
+    'JSON',
     'A válaszban kapott id-vel kérdezheted le a döntést.',
     '',
     'Döntés lekérdezése (GET, 60 mp-enként ismételve):',
@@ -990,10 +994,24 @@ A memoria 3 retegbol all (hot/warm/cold) + napi naplo.
 Minden /api/* végpont Bearer tokenes: a token a store/.dashboard-token fájlban.
 
 Memória mentés:
-curl -s -X POST ${dashboardOrigin}/api/memories -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d '{"agent_id":"AGENT_NAME","content":"MIT","category":"CATEGORY","keywords":"kulcsszo1, kulcsszo2"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/memories
+{"agent_id":"AGENT_NAME","content":"MIT","category":"CATEGORY","keywords":"kulcsszo1, kulcsszo2"}
+JSON
 
 Napi napló (append-only):
-curl -s -X POST ${dashboardOrigin}/api/daily-log -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d '{"agent_id":"AGENT_NAME","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/daily-log
+{"agent_id":"AGENT_NAME","content":"## Tema\nMi tortent, mi lett az eredmeny"}
+JSON
+
+**A FEJLECBEN NINCS ORA, ES EZ SZANDEKOS (2026-08-21).** A sablon korabban \`## HH:MM -- Tema\` volt,
+es az orat a flotta tagjai rendszeresen BECSULVE irtak be, nem merve: a bossnal nyolc esetbol nyolc,
+safarnal nyolcbol hat volt hamis (a legnagyobb tevedes 194 perc). A tarolo \`created_at\`-et rogzit,
+tehat az ora redundans volt -- es pont az az egyetlen resz, ami hazudni tudott. Ha egy sablon olyan
+mezot kovetel, aminek az egyetlen forrasa az emlekezet, az a mezo elobb-utobb hamis lesz; a szabaly
+ismerete onmagaban nem vedi meg. Ha megis kell ora egy szovegben, a \`date\` KULON, ELOZO hivasban
+fusson, es csak a LATOTT kimenet keruljon bele -- egy parancson belul a heredoc szovege mar kesz,
+mire a \`date\` lefutna. Es ha az ertek nem a \`date\`-bol jon, hanem egy mezobol, nezd meg a mezo
+idozonajat: a Telegram \`ts\` UTC-ben erkezik, lokaliskent leirva ket orat teved.
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
 curl -s -H "Authorization: Bearer $(cat ${tokenPath})" "${dashboardOrigin}/api/memories?agent=AGENT_NAME&q=KULCSSZO&category=warm"
@@ -1003,7 +1021,9 @@ curl -s -H "Authorization: Bearer $(cat ${tokenPath})" "${dashboardOrigin}/api/m
 Az ütemezett feladatok a ~/.claude/scheduled-tasks/ mappában élnek, fájl-alapúak (SKILL.md + task-config.json). A schedule runner 60 másodpercenként ellenőrzi és a te tmux session-ödbe küldi a promptot.
 
 Feladat létrehozása API-n keresztül:
-curl -s -X POST ${dashboardOrigin}/api/schedules -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d '{"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt", "schedule": "0 8 * * *", "agent": "AGENT_NAME", "type": "heartbeat"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/schedules
+{"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt", "schedule": "0 8 * * *", "agent": "AGENT_NAME", "type": "heartbeat"}
+JSON
 
 Típusok: task (mindig szól az eredménnyel) vagy heartbeat (csak fontosnál szól).
 Cron formátum: perc óra nap hónap hétnapja (pl. 0 8 * * * = minden nap 8:00).
@@ -1073,8 +1093,10 @@ Ha egy senderId üzen a csatornán AKIT EDDIG NEM ISMERSZ — nem szerepel az ak
 
 Az AGENT TULAJDONOSA (az első, aki ezt az ügynököt telepítette és párosította) az ALAPÉRTELMEZETT engedélyezett sender — őt nem kell ellenőrizni. MINDEN további senderId első üzenete (a 2., 3., stb. párosított személy vagy csoport) pinging-trigger.
 
-Példa ping ${BOT_NAME}-nek:
-curl -s -X POST ${dashboardOrigin}/api/messages -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" -d "{\\"from\\":\\"AGENT_NAME\\",\\"to\\":\\"${MAIN_AGENT_ID}\\",\\"content\\":\\"Ismeretlen sender [ID] jelezett első üzenettel: '[üzenet röviden]'. Ki ez, mit válaszoljak?\\"}"
+Példa ping ${BOT_NAME}-nek (a szöveg KÖTELEZŐEN STDIN-en megy — argumentumban a shell átírná):
+cat <<'MSG' | bash scripts/agent-msg.sh AGENT_NAME ${MAIN_AGENT_ID} -
+Ismeretlen sender [ID] jelezett első üzenettel: '[üzenet röviden]'. Ki ez, mit válaszoljak?
+MSG
 
 Addig a sender-nek csak generikus "Egy pillanat, ellenőrzöm" típusú választ adj. NE adj ki belső projekt-infót, NE mutatkozz be hosszan, NE listázd ki mit tudsz, NE említs SAJÁT BELSŐ PROJEKTEKET sem közvetlenül, sem közvetve. ${BOT_NAME} visszajelzi a kontextust és a szabályokat amelyekkel folytathatod.
 

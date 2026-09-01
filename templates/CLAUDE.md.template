@@ -102,19 +102,27 @@ A dashboard `/api/*` végpontjai Bearer tokennel védettek. A token a
 
 Memória mentés:
 ```bash
-curl -s -X POST http://localhost:{{WEB_PORT}}/api/memories \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
-  -d '{"agent_id":"{{MAIN_AGENT_ID}}","content":"MIT","category":"CATEGORY","keywords":"kulcsszó1, kulcsszó2"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/memories
+{"agent_id":"{{MAIN_AGENT_ID}}","content":"MIT","category":"CATEGORY","keywords":"kulcsszó1, kulcsszó2"}
+JSON
 ```
 
 Napi napló (append-only):
 ```bash
-curl -s -X POST http://localhost:{{WEB_PORT}}/api/daily-log \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
-  -d '{"agent_id":"{{MAIN_AGENT_ID}}","content":"## HH:MM -- Téma\nMi történt, mi lett az eredmény"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/daily-log
+{"agent_id":"{{MAIN_AGENT_ID}}","content":"## Téma\nMi történt, mi lett az eredmény"}
+JSON
 ```
+
+**A FEJLECBEN NINCS ORA, ES EZ SZANDEKOS (2026-08-21).** A sablon korabban `## HH:MM -- Tema` volt,
+es az orat a flotta tagjai rendszeresen BECSULVE irtak be, nem merve: a bossnal nyolc esetbol nyolc,
+safarnal nyolcbol hat volt hamis (a legnagyobb tevedes 194 perc). A tarolo `created_at`-et rogzit,
+tehat az ora redundans volt -- es pont az az egyetlen resz, ami hazudni tudott. Ha egy sablon olyan
+mezot kovetel, aminek az egyetlen forrasa az emlekezet, az a mezo elobb-utobb hamis lesz; a szabaly
+ismerete onmagaban nem vedi meg. Ha megis kell ora egy szovegben, a `date` KULON, ELOZO hivasban
+fusson, es csak a LATOTT kimenet keruljon bele -- egy parancson belul a heredoc szovege mar kesz,
+mire a `date` lefutna. Es ha az ertek nem a `date`-bol jon, hanem egy mezobol, nezd meg a mezo
+idozonajat: a Telegram `ts` UTC-ben erkezik, lokaliskent leirva ket orat teved.
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
 ```bash
@@ -173,10 +181,9 @@ Az ütemezett feladatok a `~/.claude/scheduled-tasks/` mappában élnek, fájl-a
 ### Feladat létrehozása API-n keresztül
 
 ```bash
-curl -s -X POST http://localhost:{{WEB_PORT}}/api/schedules \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
-  -d '{"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt amit végre kell hajtani", "schedule": "0 8 * * *", "agent": "{{MAIN_AGENT_ID}}", "type": "heartbeat"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/schedules
+{"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt amit végre kell hajtani", "schedule": "0 8 * * *", "agent": "{{MAIN_AGENT_ID}}", "type": "heartbeat"}
+JSON
 ```
 
 ### Típusok:
@@ -203,17 +210,31 @@ Az ágensek közvetlenül tudnak egymásnak üzenni egy közös SQLite üzenetso
 Ha delegálni akarsz egy feladatot másik ágensnek, használd az API-t:
 
 ```bash
-curl -s -X POST http://localhost:{{WEB_PORT}}/api/messages \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat store/.dashboard-token)" \
-  -d '{"from": "{{MAIN_AGENT_ID}}", "to": "TARGET_AGENT", "content": "Feladat leírása."}'
+cat <<'MSG' | bash scripts/agent-msg.sh {{MAIN_AGENT_ID}} TARGET_AGENT -
+Feladat leírása.
+MSG
 ```
 
-**MEGBÍZHATÓ KÜLDÉS (verify + retry) — KÖTELEZŐ:** a gyakori `curl -s ... >/dev/null && echo sent` minta VESZÉLYES: a curl `0`-val tér vissza akkor is, ha a szerver ELUTASÍTOTTA a kérést (401/400/5xx), így NÉMA küldés-hiba keletkezik — a címzett sosem kapja meg az üzenetet, és két ágens végtelenül várhat egymásra. Egy üzenet CSAK akkor számít elküldöttnek, ha a válaszban visszajött egy `id` (`{"id":<n>,"status":"pending",...}` HTTP 200-zal). Vagy használd a `scripts/agent-msg.sh` helpert (HTTP-státusz + `id` ellenőrzés + 3x újraküldés + hiba-napló), vagy nyers curl-nél KÖTELEZŐ ellenőrizni a HTTP-kódot ÉS az `id`-t, és újraküldeni ha nincs:
+**MEGBÍZHATÓ KÜLDÉS (verify + retry) — KÖTELEZŐ:** a gyakori `curl -s ... >/dev/null && echo sent` minta VESZÉLYES: a curl `0`-val tér vissza akkor is, ha a szerver ELUTASÍTOTTA a kérést (401/400/5xx), így NÉMA küldés-hiba keletkezik — a címzett sosem kapja meg az üzenetet, és két ágens végtelenül várhat egymásra. Egy üzenet CSAK akkor számít elküldöttnek, ha a válaszban visszajött egy `id` (`{"id":<n>,"status":"pending",...}` HTTP 200-zal). Vagy használd a `scripts/agent-msg.sh` helpert (HTTP-státusz + `id` ellenőrzés + 3x újraküldés + hiba-napló), vagy nyers curl-nél KÖTELEZŐ ellenőrizni a HTTP-kódot ÉS az `id`-t, és újraküldeni ha nincs.
+
+**A szöveget SOHA ne add át argumentumként** — sem a helpernek, sem curl-nek. Mire a script fut, a shell már átírta, és a kár innen láthatatlan: egy belső idézőjel LEZÁRJA a stringet és az üzenet CSONKÁN megy el (`OK id=<n>`-nel együtt), egy `$(...)` vagy backtick pedig LEFUT a te shelledben és a kimenetét beteszi a szövegbe. Mivel folyamatosan küldünk egymásnak parancs-részleteket, ez azt jelenti, hogy egy parancs *idézése* a parancs *futtatása* lesz. A helper ezért elutasítja az argumentum-formát; idézőjeles heredoc-kal (`<<'MSG'`) minden bájt változatlanul megy át.
 
 ```bash
-bash scripts/agent-msg.sh {{MAIN_AGENT_ID}} TARGET_AGENT "Feladat leírása."   # -> OK id=<n>  vagy  FAIL
-# nagy/soktoros üzenethez a content jöhet STDIN-en:  echo "..." | bash scripts/agent-msg.sh {{MAIN_AGENT_ID}} TARGET_AGENT -
+
+**A NYUGTAZAS (lezaras) UGYANIGY MEGY.** A `PUT /api/messages/<id>` `result` mezoje pont az, amiben a
+javitasokat foglaljuk ossze -- tehat rendszeresen tartalmaz idezojelet, `$(...)`-t es backtickot. Nyers
+curl-lel a shell ugyanugy megeszi vagy lefuttatja oket, mint a kuldesnel:
+
+```bash
+cat <<'RES' | bash scripts/agent-msg-close.sh <uzenet-id> done -
+Amit elvegeztel, barmilyen karakterrel.
+RES
+```
+# A content KÖTELEZŐEN STDIN-en megy, idézőjeles heredoc-kal. Az argumentum-forma EL VAN UTASÍTVA.
+cat <<'MSG' | bash scripts/agent-msg.sh {{MAIN_AGENT_ID}} TARGET_AGENT -
+Feladat leírása. Bármilyen karakter mehet bele: "idézőjel", $(parancs), `backtick`.
+MSG
+# -> OK id=<n>  vagy  FAIL
 ```
 
 A rendszer automatikusan:

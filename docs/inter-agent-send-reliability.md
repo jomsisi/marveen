@@ -22,10 +22,19 @@ Observed in the field (2026-07): a sub-agent's completion callbacks were silentl
 with HTTP 200). Verify the HTTP status **and** the returned id, and resend if missing.
 
 ## The fix
-- `scripts/agent-msg.sh <from> <to> "<content>"` — builds the JSON body with `json.dumps` (no quoting
-  pitfalls), checks HTTP status + `id`, retries up to 3×, logs failures to `store/agent-msg-failures.log`.
-  Large/multi-line content may come from STDIN with a `-` third arg. Base dir is auto-detected, port from
-  `MARVEEN_WEB_PORT` (default 3420), so it runs from any CWD / any install.
+- `cat <<'MSG' | scripts/agent-msg.sh <from> <to> -` — builds the JSON body with `json.dumps`, checks
+  HTTP status + `id`, retries up to 3×, logs failures to `store/agent-msg-failures.log`. Base dir is
+  auto-detected, port from `MARVEEN_WEB_PORT` (default 3420), so it runs from any CWD / any install.
+- **The content must come from STDIN; an argument is refused.** Verifying the send is not enough if the
+  text was already corrupted before the send. Two ways an argument breaks, both invisible downstream:
+  a double quote inside a double-quoted argument closes the string, the remainder splits into further
+  arguments, only `$3` survives — the message is delivered **truncated**, with an `OK id=<n>` that
+  truthfully reports what the script *received*. And `$(...)`/backticks **execute in the sender's shell**
+  and splice their output in (a failing command leaves an empty string and no trace) — so quoting a shell
+  snippet to a teammate runs it. The second class cannot be detected inside the script at all:
+  substitution happens before the call, so `"$(id -u)"` and `"0"` are indistinguishable there. Refusing
+  the argument form is the only check that acts before the shell rewrites the text; a quoted heredoc
+  (`<<'MSG'`) passes every byte verbatim.
 - The generated agent `CLAUDE.md` (from `templates/CLAUDE.md.template`) now documents this rule and points
   at the helper, so every agent in every fleet verifies its sends by default.
 

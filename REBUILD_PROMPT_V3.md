@@ -782,10 +782,14 @@ A memoria 3 retegbol all (hot/warm/cold) + napi naplo.
 ### NINCS MENTAL NOTE! Ha meg kell jegyezni -> AZONNAL mentsd:
 
 Memoria mentes:
-curl -s -X POST http://localhost:3420/api/memories -H "Content-Type: application/json" -d '{"agent_id":"marveen","content":"MIT","tier":"TIER","keywords":"kulcsszo1, kulcsszo2"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/memories
+{"agent_id":"marveen","content":"MIT","tier":"TIER","keywords":"kulcsszo1, kulcsszo2"}
+JSON
 
 Napi naplo (append-only):
-curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: application/json" -d '{"agent_id":"marveen","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/daily-log
+{"agent_id":"marveen","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}
+JSON
 
 Kereses:
 curl -s "http://localhost:3420/api/memories?agent=marveen&q=KULCSSZO&tier=warm"
@@ -799,7 +803,9 @@ Ha {{OWNER_NAME}} ad feladatot, vedd fel a kanban tablara is.
 ## Inter-agent kommunikacio
 
 Uzenet kuldese masik agensnek:
-curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" -d '{"from": "marveen", "to": "TARGET_AGENT", "content": "Feladat leirasa."}'
+cat <<'JSON' | bash scripts/dash-api.sh POST /api/messages
+{"from": "marveen", "to": "TARGET_AGENT", "content": "Feladat leirasa."}
+JSON
 
 ## Uzenet formatum
 
