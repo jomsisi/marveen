@@ -1799,7 +1799,7 @@ export function createKanbanCard(card: {
 // RouteContext carries an auth principal, but it would fill this column from two different
 // namespaces: agent traffic arrives with a bearer token and resolves to { kind: 'token' } with no
 // user at all, while a human dashboard login resolves to { kind: 'session', user } -- a login name.
-// The column holds agent ids today (measured 2026-08-31: sanyiba 22, boss 16, safar 6, null 13).
+// The column holds agent ids today (measured 2026-08-31: 44 rows carry an agent id, 13 are null).
 // One column with two meanings is worse than an empty one: a null is visibly missing data, a
 // mixed namespace is not. So the actor comes from the caller, exactly as moveKanbanCard takes it.
 export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>, actor?: string): boolean {

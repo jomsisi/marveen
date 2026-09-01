@@ -71,17 +71,17 @@ describe('parsePollerPidsFromPs', () => {
   // helper scripts. Before the argv type-check, the reaper matched all of them
   // and SIGKILLed the agent along with its in-flight work.
   const AGENT_SESSION_SAMPLE = [
-    ' 1146178 pts/9  Sl+  0:42 /root/.local/bin/claude --dangerously-skip-permissions --model claude-opus-5 --channels plugin:telegram@claude-plugins-official HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
-    ' 1146213 pts/9  Sl+  0:01 bun run --cwd /root/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 --shell=bun --silent start HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
-    ' 1146218 pts/9  Sl+  0:05 /root/.bun/bin/bun server.ts HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
-    ' 1151730 pts/9  S    0:00 /usr/bin/bash -c source /root/.claude/shell-snapshots/snapshot-bash-123.sh && sqlite3 store/claudeclaw.db HOME=/root TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram',
+    ' 1146178 pts/9  Sl+  0:42 /opt/claw/bin/claude --dangerously-skip-permissions --model claude-opus-5 --channels plugin:telegram@claude-plugins-official HOME=/opt/claw TELEGRAM_STATE_DIR=/opt/claw/agents/agent-a/.claude/channels/telegram',
+    ' 1146213 pts/9  Sl+  0:01 bun run --cwd /opt/claw/.claude/plugins/cache/claude-plugins-official/telegram/0.0.0 --shell=bun --silent start HOME=/opt/claw TELEGRAM_STATE_DIR=/opt/claw/agents/agent-a/.claude/channels/telegram',
+    ' 1146218 pts/9  Sl+  0:05 /opt/claw/bin/bun server.ts HOME=/opt/claw TELEGRAM_STATE_DIR=/opt/claw/agents/agent-a/.claude/channels/telegram',
+    ' 1151730 pts/9  S    0:00 /usr/bin/bash -c source /opt/claw/.claude/shell-snapshots/snapshot-bash-123.sh && sqlite3 store/claudeclaw.db HOME=/opt/claw TELEGRAM_STATE_DIR=/opt/claw/agents/agent-a/.claude/channels/telegram',
   ].join('\n')
 
   it('reaps ONLY the pollers, never the agent claude process or its bash children', () => {
     const pids = parsePollerPidsFromPs(
       AGENT_SESSION_SAMPLE,
       'TELEGRAM_STATE_DIR',
-      '/srv/app/agents/michel/.claude/channels/telegram',
+      '/opt/claw/agents/agent-a/.claude/channels/telegram',
     )
     expect(pids).toEqual([1146213, 1146218])
     expect(pids).not.toContain(1146178) // the agent itself
@@ -91,9 +91,9 @@ describe('parsePollerPidsFromPs', () => {
   it('fails closed when the row is truncated past the argv', () => {
     // A truncated row loses the plugin marker; the correct bias is to skip the
     // pid rather than kill something we could not identify.
-    const truncated = ' 1146218 pts/9  Sl+  0:05 /root/.bun/bin/b TELEGRAM_STATE_DIR=/srv/app/agents/michel/.claude/channels/telegram'
+    const truncated = ' 1146218 pts/9  Sl+  0:05 /opt/claw/bin/b TELEGRAM_STATE_DIR=/opt/claw/agents/agent-a/.claude/channels/telegram'
     expect(
-      parsePollerPidsFromPs(truncated, 'TELEGRAM_STATE_DIR', '/srv/app/agents/michel/.claude/channels/telegram'),
+      parsePollerPidsFromPs(truncated, 'TELEGRAM_STATE_DIR', '/opt/claw/agents/agent-a/.claude/channels/telegram'),
     ).toEqual([])
   })
 
@@ -188,7 +188,7 @@ describe('findOrphanChannelClaudes', () => {
 // undiagnosed. buildPollerEvidence must drop the claude pid itself.
 describe('buildPollerEvidence: the claude pid is never its own poller', () => {
   it('reports no-poller when the only env-scan hit is the agent claude process', () => {
-    const procs: ProcRow[] = [{ pid: 672722, ppid: 12548, command: '/root/.local/bin/claude --channels plugin:telegram@claude-plugins-official' }]
+    const procs: ProcRow[] = [{ pid: 672722, ppid: 12548, command: '/opt/claw/bin/claude --channels plugin:telegram@claude-plugins-official' }]
     const ev = buildPollerEvidence(procs, null, [672722], 672722)
     expect(ev.interpretation).toBe('no-poller')
     expect(ev.rows).toEqual([])
@@ -196,8 +196,8 @@ describe('buildPollerEvidence: the claude pid is never its own poller', () => {
 
   it('still reports in-tree when a REAL poller is under claude', () => {
     const procs: ProcRow[] = [
-      { pid: 672722, ppid: 12548, command: '/root/.local/bin/claude --channels plugin:telegram@claude-plugins-official' },
-      { pid: 672900, ppid: 672722, command: '/root/.bun/bin/bun server.ts' },
+      { pid: 672722, ppid: 12548, command: '/opt/claw/bin/claude --channels plugin:telegram@claude-plugins-official' },
+      { pid: 672900, ppid: 672722, command: '/opt/claw/bin/bun server.ts' },
     ]
     const ev = buildPollerEvidence(procs, null, [672722, 672900], 672722)
     expect(ev.interpretation).toBe('in-tree')

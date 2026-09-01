@@ -50,9 +50,9 @@ const STATE_ENV_VAR: Record<ChannelProviderType, string> = {
 // spawned inside an agent session inherits <envVar>=<chanDir>: the agent's own
 // `claude` process, every Bash-tool child, every helper script. Reaping on the
 // env match alone therefore SIGKILLs the agent itself along with whatever work
-// it had in flight (found 2026-08-02 by michel, who ran the same scan against
-// his own state dir and got his claude pid + bash children back alongside the
-// two real pollers). Independent confirmation from the same day: a "Plugin-down
+// it had in flight (found 2026-08-02 by an operator who ran the same scan
+// against their own state dir and got their claude pid + bash children back
+// alongside the two real pollers). Independent confirmation from the same day: a "Plugin-down
 // FORENSICS" log line reported envScanPids: [672722] -- that pid was the agent's
 // claude process, not a poller.
 //
@@ -193,7 +193,7 @@ export function buildPollerEvidence(
   // env scan hands it to us as a "poller". isUnderClaude(claudePid) is trivially
   // true, which flipped the verdict to 'in-tree' -- "a live poller IS in the
   // claude tree, the probe is wrong, not the plugin" -- at the exact moment the
-  // plugin really had died (observed 2026-08-02 13:57 for agent michel, logged as
+  // plugin really had died (observed 2026-08-02 13:57 on one agent, logged as
   // envScanPids: [672722], a claude pid). parsePollerPidsFromPs now type-checks
   // argv so this should never arrive, but the verdict is too consequential to
   // depend on the caller: a wrong 'in-tree' hides a genuinely dead plugin.

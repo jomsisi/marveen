@@ -37,7 +37,7 @@ import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_lib  # noqa: E402
 
-# NAPLO -- MERT A NEMA OR NEM MERHETO (2026-08-24, michel jelzese nyoman).
+# NAPLO -- MERT A NEMA OR NEM MERHETO (2026-08-24, egy uzemeltetoi jelzes nyoman).
 #
 # A TESTVER-OR (`scripts/channel-reply-guard.sh`) 2026-08-21 ota naploz, ez a fajl NEM -- pedig
 # ugyanarra a szabalyra vigyaz, csak mas agenseknel es mas adatbol (ledger vs transcript). A
