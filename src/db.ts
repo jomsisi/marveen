@@ -1795,7 +1795,14 @@ export function createKanbanCard(card: {
   touchAncestorChain(card.parent_id, now, card.id)
 }
 
-export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>): boolean {
+// The `actor` is OPTIONAL and defaults to null, and that is a decision, not an omission.
+// RouteContext carries an auth principal, but it would fill this column from two different
+// namespaces: agent traffic arrives with a bearer token and resolves to { kind: 'token' } with no
+// user at all, while a human dashboard login resolves to { kind: 'session', user } -- a login name.
+// The column holds agent ids today (measured 2026-08-31: sanyiba 22, boss 16, safar 6, null 13).
+// One column with two meanings is worse than an empty one: a null is visibly missing data, a
+// mixed namespace is not. So the actor comes from the caller, exactly as moveKanbanCard takes it.
+export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>, actor?: string): boolean {
   const card = getKanbanCard(id)
   if (!card) return false
   const now = Math.floor(Date.now() / 1000)
@@ -1810,6 +1817,20 @@ export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'i
     // Stamping only the new parent would leave the old one looking frozen -- the very bug this
     // function is fixing, just rarer and therefore harder to notice.
     if (card.parent_id && card.parent_id !== f.parent_id) touchAncestorChain(card.parent_id, now, id)
+    // A status change through THIS path used to leave no trace, while the same change through
+    // moveKanbanCard did -- two routes to one transition, only one of them audited. The dashboard's
+    // edit form goes through here, so anything built from the events (a timeline, a cycle time, the
+    // stale-status probe) was reading a fifth of the transitions and could not tell that from a
+    // complete history: the card's own state was correct either way.
+    //
+    // `card` is the row as it stood BEFORE the write, so it is the same `prev` moveKanbanCard reads
+    // by hand. There is no `prev !== undefined` guard here because there cannot be one: a missing
+    // card already returned false above.
+    if (f.status !== card.status) {
+      db.prepare(
+        'INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at) VALUES (?, ?, ?, ?, ?)'
+      ).run(id, card.status, f.status, actor ?? null, now)
+    }
   }
   return changed
 }

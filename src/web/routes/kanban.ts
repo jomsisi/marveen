@@ -255,8 +255,14 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   if (path === '/api/kanban' && method === 'POST') {
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
-    const id = randomUUID().slice(0, 8)
-    createKanbanCard({ id, ...data })
+    // The caller may supply its own id (we use readable slugs for long-lived cards).
+    // Resolve it BEFORE the spread so the stored id and the reported id are the same
+    // value: `{ id, ...data }` let a caller-supplied id win in the row while the
+    // response still echoed the generated one, so anything referencing the returned
+    // id pointed at a card that does not exist -- with HTTP 200.
+    const suppliedId = typeof data.id === 'string' ? data.id.trim() : ''
+    const id = suppliedId || randomUUID().slice(0, 8)
+    createKanbanCard({ ...data, id })
     json(res, { ok: true, id })
     return true
   }
@@ -266,7 +272,12 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(kanbanCardMatch[1])
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
-    if (updateKanbanCard(id, data)) { json(res, { ok: true }); return true }
+    // The actor is read off the body, the same way the move route takes it, so both paths write
+    // the same kind of value into kanban_card_events.actor. `data` is passed through unchanged:
+    // updateKanbanCard only ever writes named columns, so a stray `actor` key is ignored there,
+    // and destructuring it out would add a throw path for a non-object body.
+    const putActor = typeof data?.actor === 'string' ? data.actor : undefined
+    if (updateKanbanCard(id, data, putActor)) { json(res, { ok: true }); return true }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
