@@ -17,6 +17,10 @@ __pycache__/
 .env.*
 !.env.example
 store/
+# A fo-agens research/ mappaja a PROJECT_ROOT alatt van (agentConfigRoot -> PROJECT_ROOT),
+# a sub-agenseke viszont az agents/ alatt, ami mar ignoralt. Enelkul a fo-agens uzemi
+# elemzesei (bevetel, szallitoi szamlak, sajat meresek) a PUBLIKUS repoba kerulnenek.
+research/
 workspace/
 agents/
 reports/
@@ -52,6 +56,20 @@ mcp-servers/
 mcp-catalog.local.json
 
 # Personal/project-specific docs (not part of the product)
+# Uzemi (flotta-specifikus) doksi: agens-nevek, tmux-panel utvonalak, Vault-hivatkozas.
+# A repo PUBLIKUS (github.com/jomsisi/marveen), ez pedig nem termek-dokumentacio.
+docs/uzemzavar-claude-kieses.md
+# 2026-08-27, Zsolt dontese: a negy uzleti doksi ATKERULT a `.channels-config/uzleti-docs/` ala
+# (az a mappa egeszeben ignoralt). Ezek a sorok a VISSZASZIVARGAS ellen allnak: ha ugyanaz a
+# folyamat ujra a docs/ ala irna oket, egy `git add .` ne vigye be oket a PUBLIKUS repoba.
+# TARTALMUK MIATT: a funkcio-leltar egy SZOLGALTATO rendszeret irja le belulrol (a hatter-API-javal)
+# es megnevezi, mit fizetunk; az utemterv egy MEG FUTO szerzodes kivaltasanak strategiaja.
+# FIGYELEM: ez NEV-alapu vedelem, tehat csak EZT a negy fajlt fogja meg. Uj, mas nevu uzleti doksi
+# ellen nem ved -- az uj anyag HELYE eleve a `.channels-config/uzleti-docs/`, ne a docs/.
+docs/ecc-atolvasas.md
+docs/mi-club-email-modszertan.md
+docs/mi-club-funkcio-leltar.md
+docs/mi-club-kivaltas-utemterv.md
 # Old rebuild prompts (keep V3 which is the current one)
 REBUILD_PROMPT.md
 REBUILD_PROMPT_V2.md
@@ -121,5 +139,133 @@ __pycache__/
 # CSAK errol az uzemeltetorol szol (uzemi)? A masodikat ide kell felvenni.
 scripts/tuya-cloud.py
 scripts/voice-bridge.py
-scripts/browser/kupon-szamla-letoltes.mjs
-scripts/browser/webmail-verify-sent.mjs
+#
+# A `scripts/browser/` EGESZE ignoralt, es ez tudatos valtas a fajlonkenti
+# felsorolasrol (2026-08-20). MERVE: a 21 szkriptbol 19 se nem kovetett, se nem
+# ignoralt volt -- vagyis pontosan az az allapot, ami ellen a fenti bekezdes
+# ir. Beegetett titok egyikben sincs (a jelszo vaultbol/env-bol jon), de a
+# gazda valodi email-cimeit es uzemi felulet-ismeretet hordozzak, es a remote
+# PUBLIKUS (Szotasz/marveen, visibility=PUBLIC, merve).
+#
+# A fajlonkenti lista NEM VEDETT: minden uj szkript alapertelmezesben kint
+# maradt, es a vedelem attol fuggott, hogy valaki eszbe kap. A konyvtar-szabaly
+# fail-closed: az uj fajl alapertelmezesben VEDVE van.
+#
+# HA egy itteni szkript tenyleg termek (mas telepitesnek is hasznos), az NEM
+# ugy kerul be, hogy ezt a sort lazitod, hanem egy KIFEJEZETT negalo sorral
+# alatta (`!scripts/browser/<nev>.mjs`) -- igy a dontes latszik a diffben.
+scripts/browser/
+#
+# A `scripts/*.py` UGYANAZT A LECKET ADTA, MINT A `scripts/browser/` (merve 2026-08-21):
+# a 19 python-szkriptbol 7 kovetett (termek), 2 ignoralt, es TIZ se nem kovetett, se nem
+# ignoralt volt -- vagyis vedtelen, es egy `git add -A` kivitte volna oket a PUBLIKUS repoba.
+# A fajlonkenti felsorolas masodszor is ugyanugy bukott: minden UJ szkript alapertelmezesben
+# kimaradt belole.
+#
+# EZERT MEGFORDITVA: a `scripts/*.py` alapertelmezesben IGNORALT (fail-closed), es a TERMEK-
+# szkriptek egyenkent, NEVVEL vannak visszaengedve. Igy egy uj szkript alapbol VEDVE van, es
+# aki termeknek szanja, annak egy latszo sort kell irnia ide -- a dontes megjelenik a diffben.
+#
+# FIGYELEM: a mar KOVETETT fajlokra a gitignore nem hat; a negalo sorok nem azert kellenek,
+# hogy a git lassa oket, hanem hogy a szandek irasban alljon es a `git check-ignore` ne
+# hazudjon rola.
+scripts/*.py
+!scripts/boot-hook-prune.py
+!scripts/gdocs.py
+!scripts/intel_db.py
+!scripts/memory-link-audit.py
+!scripts/usage-collect.py
+!scripts/watchdog-inbound-prober.py
+!scripts/watchdog-userbot-login.py
+#
+# ES UGYANEZ NEGY EGESZ KONYVTARRA (merve 2026-08-21, ugyanabban a korben): a
+# `scripts/kavosz/`, `scripts/hirlevel/`, `scripts/evedd/` es `scripts/pi/` alatt
+# EGYETLEN kovetett fajl sincs -- mind a negy teljes egeszeben egy konkret uzemeltetorol
+# szol (KAVOSZ-palyazat, MI Club hirlevel-lista, evedd.hu ugyeleti jelentes, a nappali
+# Raspberry Pi-je). A `scripts/*.py` szabaly ezeket NEM erte el ket okbol: nem a
+# gyokerben vannak, es `.mjs`/`.cjs`/`.sh` fajlokat is tartalmaznak.
+scripts/kavosz/
+scripts/hirlevel/
+scripts/evedd/
+scripts/pi/
+
+# Biztonsagi masolatok (kezi szokas, semmi nem gyartja automatikusan).
+# 2026-08-29: hat ilyen fajl allt a fabon NEM-ignoraltan es NEM-kovetetten, koztuk
+# ot uzemi szkript masolata -- egy `git add .` bevitte volna oket a PUBLIKUS repoba.
+# A vedelem itt SZERKEZETI: nem szabaly-kovetesen mulik, hanem a mintan.
+*.bak
+*.bak-*
+#
+# ES UGYANEZ A `.sh` ES A `.mjs`/`.cjs` KITERJESZTESRE A `scripts/` GYOKEREBEN (merve 2026-09-01).
+# A szabalyt a `scripts/browser/` es a `scripts/*.py` eseten mar meghoztuk; a `.sh` es a `.mjs`
+# egyszeruen kimaradt belole, es a kulonbseg meressel latszik: a gyokerben HUSZ olyan `.sh`/`.mjs`/
+# `.cjs` allt, ami se nem kovetett, se nem ignoralt volt -- koztuk bolti mentesek, hirdetesi
+# lekerdezesek, egy konkret Raspberry Pi hangszoroja es egy postafiok-figyelo. Egy `git add -A`
+# mindet kivitte volna a PUBLIKUS repoba.
+#
+# AMIBEN EZ A KET KITERJESZTES MAS, MINT A `.py`, ES AMIERT EZT KI KELL MONDANI: itt a TERMEK van
+# tobbsegben (47 kovetett `.sh` a gyokerben, szemben 20 kovetetlennel), tehat a kivetel-lista HOSSZU.
+# Ez tudatosan vallalt ar. A masik iranyu kockazat viszont valodi, es nevesitve marad: egy UJ TERMEK-
+# szkript mostantol alapertelmezesben KIMARAD, ha senki nem ir ide sort. Ez a hiba MA IS letezik, e
+# szabaly nelkul: a `dash-api.sh` es az `agent-msg-close.sh` futtatasat a `templates/CLAUDE.md.template`
+# es a `src/web/agent-scaffold.ts` MINDEN uj agensnek eloirja, kozben egyikuk sem volt a repoban.
+# A szabaly ezen annyit javit, hogy a termek-szkriptek listaja EGY helyen, lathatoan all.
+scripts/*.sh
+!scripts/agent-msg-get.sh
+!scripts/agent-msg.sh
+!scripts/auth.sh
+!scripts/backup.sh
+!scripts/channel-keepalive-probe.sh
+!scripts/channel-reply-guard.sh
+!scripts/channel-watchdog.sh
+!scripts/channels.sh
+!scripts/disk-space-guard.sh
+!scripts/doctor.sh
+!scripts/ensure-managed-channels-enabled.sh
+!scripts/ensure-native-modules.sh
+!scripts/fix-agent-auth-headers.sh
+!scripts/fix-avx.sh
+!scripts/fleet-memory-gate.sh
+!scripts/fleet-safe-start.sh
+!scripts/github-pr-monitor.sh
+!scripts/host-restart-watchdog.sh
+!scripts/install-channel-coordinator.sh
+!scripts/install-channel-image-hook.sh
+!scripts/install-channel-keepalive-probe.sh
+!scripts/install-git-guard-hook.sh
+!scripts/install-telegram-image-hook.sh
+!scripts/install-telegram-progress-hook.sh
+!scripts/install-voice.sh
+!scripts/launchd-unit.sh
+!scripts/limit-monitor.sh
+!scripts/migrate-main-agent-id.sh
+!scripts/migrate.sh
+!scripts/monitor_agents.sh
+!scripts/morning-briefing.sh
+!scripts/notify.sh
+!scripts/pre-modify-backup.sh
+!scripts/pre-pr-review.sh
+!scripts/set-bot-menu.sh
+!scripts/skill-index.sh
+!scripts/smoke-test-slack-channel.sh
+!scripts/start.sh
+!scripts/statusline-ratelimit.sh
+!scripts/stop.sh
+!scripts/stuck-modal-guard.sh
+!scripts/sync-hooks.sh
+!scripts/unit-fail-notify.sh
+!scripts/vault-env-wrapper.sh
+!scripts/vault-headers-helper.sh
+!scripts/verify-channels-health.sh
+!scripts/watchdog.sh
+!scripts/agent-msg-close.sh
+!scripts/dash-api.sh
+scripts/*.mjs
+scripts/*.cjs
+!scripts/channel-inbound-tee.mjs
+!scripts/channels-auth-probe.mjs
+!scripts/email-send-gate.mjs
+!scripts/main-agent-isolated-config.mjs
+!scripts/self-pace-gate.mjs
+!scripts/vault-headers-helper.mjs
+!scripts/vault-resolve.mjs
