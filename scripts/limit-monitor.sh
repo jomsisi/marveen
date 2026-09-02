@@ -54,6 +54,15 @@ fi
 # Owner alert, Bot API only. No Claude invocation anywhere in this path -- the
 # whole point is that it still works when the quota is gone.
 # ---------------------------------------------------------------------------
+# Both alert paths go through this, and it returns the TRUE outcome: the shared
+# contract (curl exit 0 AND "ok":true), never a bare curl exit. The old body
+# ignored the response entirely and logged "ALERT sent" unconditionally -- an
+# HTTP 200 carrying {"ok":false} (bad chat_id, blocked bot, mangled .env) was
+# indistinguishable from a delivered alert. That is the failure mode this whole
+# script exists to avoid: the one alert that matters is the one nobody gets.
+# Callers MUST stamp their dedupe state only when this returns 0.
+. "$INSTALL_DIR/scripts/lib/send-telegram.sh"
+
 send_alert() {
   local msg="$1" tag="$2" token
   token="$(grep -oE '[0-9]+:[A-Za-z0-9_-]+' "$HOME/.claude/channels/telegram/.env" 2>/dev/null | head -1)"
@@ -61,11 +70,13 @@ send_alert() {
     log "ALERT wanted but no bot token found: $tag"
     return 1
   fi
-  curl -s -m 15 "https://api.telegram.org/bot$token/sendMessage" \
-    --data-urlencode "chat_id=$CHAT_ID" \
-    --data-urlencode "text=$msg" \
-    --data-urlencode "disable_web_page_preview=true" -o /dev/null
-  log "ALERT sent to $CHAT_ID: $tag"
+  if send_telegram_message "$token" "$CHAT_ID" "$msg" \
+       --data-urlencode "disable_web_page_preview=true" 2>>"$LOG"; then
+    log "ALERT sent to $CHAT_ID: $tag"
+    return 0
+  fi
+  log "ALERT send FAILED (nothing was delivered): $tag"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -82,7 +93,7 @@ QUOTA_WARN_PCT="${QUOTA_WARN_PCT:-90}"
 QUOTA_MAX_AGE_SEC="${QUOTA_MAX_AGE_SEC:-21600}"
 
 if [ -s "$QUOTA_FILE" ] && command -v python3 >/dev/null 2>&1; then
-  QUOTA_OUT="$(QUOTA_FILE="$QUOTA_FILE" QUOTA_WARN_PCT="$QUOTA_WARN_PCT" QUOTA_MAX_AGE_SEC="$QUOTA_MAX_AGE_SEC" python3 - <<'PYQ' 2>/dev/null
+  QUOTA_OUT="$(QUOTA_FILE="$QUOTA_FILE" QUOTA_WARN_PCT="$QUOTA_WARN_PCT" QUOTA_MAX_AGE_SEC="$QUOTA_MAX_AGE_SEC" python3 - <<\PYQ 2>/dev/null
 import json, os, time
 
 path = os.environ["QUOTA_FILE"]
@@ -135,7 +146,7 @@ if not hits:
         print("EXPIRED\t%s" % ",".join(expired))
     raise SystemExit(0)
 
-# Dedupe key: window + crossed level + that window's own reset timestamp. One
+# Dedupe key: window + crossed level + the reset timestamp of that window. One
 # alert per level per window; the next window (new resets_at) starts clean.
 key = "|".join("%s:%s:%s" % (k, lv, rs) for k, _p, _w, rs, lv in hits)
 lines = []
@@ -163,12 +174,18 @@ PYQ
       if [ "$QKEY" = "$(cat "$QSTATE" 2>/dev/null)" ]; then
         log "quota signal unchanged, already alerted"
       else
-        printf '%s' "$QKEY" > "$QSTATE"
-        send_alert "‼️ CLAUDE KERET ($BOT_NAME monitor)
+        # The stamp is written AFTER a confirmed delivery, never before: a failed
+        # alert buried by its own suppression stamp is lost forever, and the next
+        # tick would report "quota signal unchanged, already alerted".
+        if send_alert "‼️ CLAUDE KERET ($BOT_NAME monitor)
 
 $QTEXT
 
-Ezt Claude nelkul mertem, a status line altal kiadott szamokbol. Ha elfogy, az agensek nem tudnak valaszolni a keret nullazodasaig." "quota:$QKEY"
+Ezt Claude nelkul mertem, a status line altal kiadott szamokbol. Ha elfogy, az agensek nem tudnak valaszolni a keret nullazodasaig." "quota:$QKEY"; then
+          printf '%s' "$QKEY" > "$QSTATE"
+        else
+          log "quota alert NOT delivered, stamp withheld -- the next tick retries: $QKEY"
+        fi
       fi
       ;;
   esac
@@ -203,14 +220,31 @@ if [ -z "$CANDIDATE" ]; then
   exit 0
 fi
 
-# Dedupe: hash the signal; only alert if new
-HASH="$(printf '%s' "$CANDIDATE" | md5sum | awk '{print $1}')"
-PREV="$(cat "$STATE" 2>/dev/null)"
-if [ "$HASH" = "$PREV" ]; then
-  log "signal unchanged, already alerted ($HASH)"
-  exit 0
-fi
-echo "$HASH" > "$STATE"
+# Dedupe: hash the signal; only alert if new. The stamp is written ONLY after
+# a confirmed send (below): stamping up front buried every failed alert under
+# its own dedupe -- the send failed, the hash said "already alerted", and the
+# warning was lost forever, precisely during quota/network degradation
+# (NOTIFYVAKSWEEP826, the worst row of the sweep).
+#
+# The hash comes from the shared existence-checked helper (MD5SUMHIANY826):
+# the old bare `md5sum` pipeline yielded an EMPTY hash on macOS (no md5sum),
+# empty == empty compared "unchanged", and every alert was silently swallowed
+# on the flagship host. If NO hashing tool exists at all, this path fails
+# OPEN: a duplicate alert on every tick is recoverable, a swallowed limit
+# warning is not.
+. "$INSTALL_DIR/scripts/lib/content-hash.sh"
+HASH="$(printf '%s' "$CANDIDATE" | dedupe_check "$STATE")"
+case $? in
+  0) : ;; # new signal -> alert below
+  1)
+    log "signal unchanged, already alerted ($HASH)"
+    exit 0
+    ;;
+  *)
+    HASH=""
+    log "content_hash UNAVAILABLE -- dedupe disabled for this tick, alerting anyway (fail-open)"
+    ;;
+esac
 
 # (2) Fallback path: text signals in the logs and the live panes.
 SNIP="$(printf '%s' "$CANDIDATE" | head -3)"
@@ -220,4 +254,13 @@ A logokban/sessionben limit-jel jelent meg:
 $SNIP
 
 Lehet hogy közeledünk vagy elértük a Claude előfizetés keretét. Ha kell, ritkítom a heartbeatet vagy szünetet tartok. Nézd meg a sessiont ha tudod."
-send_alert "$MSG" "$HASH"
+# Both alert paths now share ONE contract via send_alert(): honest send, and the
+# dedupe stamp written ONLY after a confirmed delivery, so a failed alert retries
+# on the next timer tick instead of vanishing behind its own suppression stamp.
+if send_alert "$MSG" "${HASH:-nohash}"; then
+  # No stamp on an empty hash (fail-open tick): an empty state file is the exact
+  # shape the MD5SUMHIANY826 bug hid behind.
+  [ -n "$HASH" ] && echo "$HASH" > "$STATE"
+else
+  log "ALERT send FAILED (will retry next tick, stamp NOT written): ${HASH:-nohash}"
+fi
