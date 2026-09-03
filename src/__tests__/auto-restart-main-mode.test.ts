@@ -23,6 +23,7 @@ function code(rel: string): string {
 }
 const STORE = code('../web/auto-restart-store.ts')
 const RUNNER = code('../web/auto-restart-runner.ts')
+const APP = code('../../web/app.js')
 
 describe('mainAgentModeIsFresh', () => {
   const cont = { ...DEFAULT_AUTO_RESTART, mode: 'continue' as const }
@@ -84,5 +85,36 @@ describe('write-side only (the sentinel depends on it)', () => {
     expect(warnAt, 'checkAgent does not call warnIfMainModeIgnored').toBeGreaterThan(-1)
     expect(guardAt, 'the enabled-guard moved or was renamed').toBeGreaterThan(-1)
     expect(warnAt).toBeLessThan(guardAt)
+  })
+})
+
+// The client half of this change set, and the half nothing else covers: every
+// other test here reads the SERVER, so removing the line below leaves the whole
+// suite green while the store and the view drift apart. Measured, not assumed --
+// a run with the writer normalizing but this call missing stored 'fresh' and
+// left the select reading 'continue'.
+//
+// TO A LATER READER: the assignment on the line above the call looks like it
+// already does the job. It does not. It updates the in-memory model; the visible
+// <select> is only ever written by setupAutoRestartUI. Deleting this call as a
+// duplicate re-opens exactly the bug this change set closed, in the opposite
+// direction -- and silently, because the save still returns 200.
+describe('the save handler re-renders the form (client side)', () => {
+  const handler = (APP.split("getElementById('saveAutoRestartBtn')")[1] ?? '').slice(0, 1600)
+
+  it('positive control: the save handler block was found', () => {
+    expect(handler.length, 'saveAutoRestartBtn handler not found in web/app.js').toBeGreaterThan(400)
+    expect(handler).toMatch(/\/auto-restart/)
+    expect(handler).toMatch(/currentAgent\.autoRestart\s*=/)
+  })
+
+  it('calls setupAutoRestartUI after storing the saved payload', () => {
+    // Word-bounded: toContain() stays green for a renamed identifier that merely
+    // starts with the old name, which is how a rename mutation survived the first
+    // version of the control in this file.
+    expect(handler).toMatch(/\bsetupAutoRestartUI\s*\(/)
+    const assignAt = handler.search(/currentAgent\.autoRestart\s*=/)
+    const renderAt = handler.search(/\bsetupAutoRestartUI\s*\(/)
+    expect(renderAt).toBeGreaterThan(assignAt)
   })
 })
