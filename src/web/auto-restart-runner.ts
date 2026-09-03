@@ -95,6 +95,38 @@ function restartMainChannelsSession(): void {
   respawnMainSessionFresh()
 }
 
+// The main agent's mode is ignored BY DESIGN (restartMainChannelsSession never
+// reads it), and writeAutoRestartConfig now stores 'fresh' for that row. So a
+// stored value other than 'fresh' means the file was written AROUND the API --
+// a script, a restored backup, a hand edit. That is the one path write-side
+// normalization cannot cover, which is exactly why it is worth a line: the
+// store watcher does not help here (auto-restart.json is on its SYSTEM_FILES
+// denylist, and it logs renames, not modifications), so nothing else would say
+// a word.
+//
+// Deduped ON THE VALUE rather than fired once per sweep. The sweep runs every
+// 60s; a warning repeated 1440 times a day is not a signal, it is a reason to
+// stop reading the log. Clearing the memo on 'fresh' means a SECOND hand edit
+// re-arms it instead of being swallowed as "already reported".
+//
+// Deliberately here and not in performRestart: that only runs when a restart is
+// actually due, so a hand edit at 14:00 would go unmentioned until 03:00 the
+// next morning. The whole point is to speak while someone is still looking.
+let lastWarnedMainMode: string | null = null
+
+function warnIfMainModeIgnored(cfg: AutoRestartConfig): void {
+  if (cfg.mode === 'fresh') {
+    lastWarnedMainMode = null
+    return
+  }
+  if (lastWarnedMainMode === cfg.mode) return
+  lastWarnedMainMode = cfg.mode
+  logger.warn(
+    { agent: MAIN_AGENT_ID, mode: cfg.mode },
+    `auto-restart: mode '${cfg.mode}' ignored for ${MAIN_AGENT_ID} (main session always respawns fresh); config likely written outside the API`,
+  )
+}
+
 function performRestart(name: string, cfg: AutoRestartConfig): void {
   if (name === MAIN_AGENT_ID) {
     restartMainChannelsSession()
@@ -105,6 +137,9 @@ function performRestart(name: string, cfg: AutoRestartConfig): void {
 
 function checkAgent(name: string, nowMs: number): void {
   const cfg = readAutoRestartConfig(name)
+  // Before the enabled-guard on purpose: the misleading field is visible on the
+  // dashboard whether or not auto-restart is switched on.
+  if (name === MAIN_AGENT_ID) warnIfMainModeIgnored(cfg)
   if (!cfg.enabled) {
     lastRestart.delete(name) // re-seed cleanly if re-enabled later
     return

@@ -4426,7 +4426,17 @@ document.getElementById('saveAutoRestartBtn').addEventListener('click', async ()
     })
     if (!res.ok) throw new Error()
     const body = await res.json()
-    if (currentAgent) currentAgent.autoRestart = body.autoRestart
+    if (currentAgent) {
+      currentAgent.autoRestart = body.autoRestart
+      // Re-render from the SAVED payload, not the typed one. The server
+      // normalizes (writeAutoRestartConfig), and for the main agent it forces
+      // mode to 'fresh' -- the main channels session always respawns fresh.
+      // Without this call the model holds 'fresh' while the select still shows
+      // what the user typed, so the store and the view disagree. That is worse
+      // than the ignored field this change set out to fix: two sources, and the
+      // one the user reads is the wrong one.
+      setupAutoRestartUI(currentAgent)
+    }
     showToast(t('agents.toast.auto_restart_saved'))
   } catch { showToast(t('common.error_save')) }
 })
