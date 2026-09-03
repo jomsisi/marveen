@@ -46,7 +46,14 @@ describe('renderHeartbeatClaudeMd', () => {
     // surfaces left are the instrument's env prefix and the step-3
     // message POST's token read.
     expect(out).toContain('CLAW_STORE_DIR=/srv/app/store')
-    expect(out).toContain('cat /srv/app/store/.dashboard-token')
+    // Step 3 posts through scripts/agent-msg.sh, so the token read happens INSIDE
+    // the helper and no longer appears in the prose. The helper is not a detour:
+    // it refuses argv content (a quote there truncates the message behind an
+    // "OK id="), checks the HTTP status AND the returned id, retries three times
+    // and logs a failure -- none of which a bare `curl -X POST` does. Replacing it
+    // with a raw POST would reintroduce the silent-send class this release spent
+    // its time removing, so the assertion follows the mechanism, not the reverse.
+    expect(out).toContain('bash scripts/agent-msg.sh heartbeat helios -')
     expect(out).not.toContain('claudeclaw.db')
   })
 
