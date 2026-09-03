@@ -41,9 +41,11 @@ else
 fi
 
 # Current kernel boot epoch (changes only on a real (re)boot of the VM/host).
-btime="$(awk '/^btime/{print $2}' /proc/stat 2>/dev/null)"
+# HOSTWD_PROC_STAT exists for tests only (there is no /proc to stub on macOS).
+PROC_STAT="${HOSTWD_PROC_STAT:-/proc/stat}"
+btime="$(awk '/^btime/{print $2}' "$PROC_STAT" 2>/dev/null)"
 if [[ -z "${btime:-}" ]]; then
-  log "no btime in /proc/stat; nothing to do"
+  log "no btime in $PROC_STAT; nothing to do"
   exit 0
 fi
 
@@ -51,10 +53,13 @@ mkdir -p "$STATE_DIR" 2>/dev/null || true
 prev=""
 [[ -f "$STATE_FILE" ]] && prev="$(tr -dc '0-9' <"$STATE_FILE" 2>/dev/null)"
 
-# Persist the current btime for the next run no matter what happens below.
-echo "$btime" >"$STATE_FILE" 2>/dev/null || true
+# The btime baseline is persisted on init below, but after a DETECTED restart
+# only once the notice actually delivered (see the send block): this is a
+# one-shot message, and stamping before a failed send lost it forever
+# (NOTIFYVAKSWEEP826). While the send keeps failing, every timer run retries.
 
 if [[ -z "$prev" ]]; then
+  echo "$btime" >"$STATE_FILE" 2>/dev/null || true
   log "baseline initialised (btime=$btime); no alert on first run"
   exit 0
 fi
@@ -112,22 +117,16 @@ if [[ -f "$ENV_FILE" ]]; then
   token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' \r\n')"
 fi
 if [[ -n "$token" && -n "$CHAT_ID" ]]; then
-  # A curl EXIT-KODJA NEM MERES: 0-val ter vissza akkor is, ha a Telegram
-  # ELUTASITOTTA a kerest (400 chat not found, 401 rossz token). A regi
-  # `>/dev/null && log "Telegram sent"` alak ezert egy NEMA kudarcot is
-  # sikernek naplozott -- pont abban a szkriptben, aminek az a dolga, hogy
-  # szoljon. Az egyetlen bizonyitek a valasz `"ok":true` mezoje.
-  resp="$(curl -s --max-time 15 \
-    "https://api.telegram.org/bot${token}/sendMessage" \
-    --data-urlencode "chat_id=${CHAT_ID}" \
-    --data-urlencode "text=${msg}" 2>/dev/null)"
-  if [[ "$resp" == *'"ok":true'* ]]; then
-    log "Telegram sent (a Telegram visszaigazolta: ok=true)"
+  # Honest send (curl exit 0 AND "ok":true -- an HTTP 200 with ok:false was
+  # invisible here before). Baseline stamped ONLY on confirmed delivery: this
+  # one-shot notice must survive a transient send failure by retrying on the
+  # next run, not by being marked done.
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/send-telegram.sh"
+  if send_err="$(send_telegram_message "$token" "$CHAT_ID" "$msg" 2>&1)"; then
+    echo "$btime" >"$STATE_FILE" 2>/dev/null || true
+    log "Telegram sent (btime baseline stamped)"
   else
-    # A hibaokot IS naploznunk kell, kulonben a kovetkezo olvaso a halozatra
-    # gyanakszik, holott tipikusan egy rossz chat_id vagy lejart token az ok.
-    # A valasz nem tartalmaz tokent, tehat naplozhato.
-    log "Telegram send FAILED -- a valasz: ${resp:-<ures: nincs HTTP valasz>}"
+    log "Telegram send FAILED -- baseline NOT stamped, will retry next run: ${send_err}"
   fi
 else
   log "skipping Telegram (${HOST_KIND} restart still logged): missing${token:+}$( [[ -z "$token" ]] && echo ' TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV)')$( [[ -z "$CHAT_ID" ]] && echo ' MARVEEN_ALERT_CHAT_ID')"

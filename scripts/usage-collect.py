@@ -6,7 +6,10 @@ Reads current usage/quota status for two providers:
   - Codex (OpenAI Codex CLI): authoritative, parsed from the newest
     ~/.codex/sessions/*/*/*/rollout-*.jsonl rate_limits event.
   - Claude (Claude Code subscription): tries the authoritative
-    api.anthropic.com/api/oauth/usage endpoint first. On a transient
+    api.anthropic.com/api/oauth/usage endpoint first, authenticating with
+    the session OAuth token (~/.claude/.credentials.json, or the macOS
+    login Keychain entry "Claude Code-credentials" -- on darwin the file
+    does not exist). On a transient
     failure (429/5xx/timeout) it reuses the last authoritative snapshot
     from store/usage-latest.json if it's fresh enough (source becomes
     "authoritative_cached") instead of losing real numbers. Only falls
@@ -92,7 +95,9 @@ LATEST_PATH = os.path.join(STORE_DIR, "usage-latest.json")
 STATE_PATH = os.path.join(STORE_DIR, "usage-alert-state.json")
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
 
-BUDAPEST = ZoneInfo("Europe/Budapest")
+# Display timezone for reset stamps. Defaults to the project's Europe/Budapest;
+# override with MARVEEN_TZ for an install whose owner lives elsewhere.
+LOCAL_TZ = ZoneInfo(os.environ.get("MARVEEN_TZ", "Europe/Budapest"))
 
 TOKEN_FIELDS = (
     "input_tokens",
@@ -115,7 +120,7 @@ def fmt_reset(resets_at, now_utc=None):
     except (ValueError, OSError, OverflowError, TypeError):
         return "unknown", "unknown"
     now_utc = now_utc or datetime.now(timezone.utc)
-    local_str = dt_utc.astimezone(BUDAPEST).strftime("%Y-%m-%d %H:%M %Z")
+    local_str = dt_utc.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M %Z")
     secs = (dt_utc - now_utc).total_seconds()
     if secs <= 0:
         rel = "now"
@@ -305,8 +310,42 @@ def collect_codex():
 # Claude collector -- authoritative endpoint, else local-transcript estimate
 # --------------------------------------------------------------------------
 
+def _read_keychain_token():
+    """macOS only: Claude Code keeps its OAuth credentials in the login
+    Keychain, NOT in ~/.claude/.credentials.json (that file simply does not
+    exist on darwin). Returns the access token or None. Never logs the value.
+
+    Failures are silent by design: on a headless/launchd run the `security`
+    call can be denied or block on a GUI prompt, so it is bounded by a
+    timeout and falls through to the next source instead of raising."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        proc = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout.strip())
+    except Exception:
+        return None
+    oauth = data.get("claudeAiOauth") or {}
+    return oauth.get("accessToken") or data.get("accessToken") or None
+
+
 def _read_claude_token():
-    """Return (token, token_source) or (None, None). Never logs the value."""
+    """Return (token, token_source) or (None, None). Never logs the value.
+
+    Source order matters: the long-lived `claude setup-token` value that
+    typically lands in the .env file is NOT accepted by the oauth/usage
+    endpoint (it answers 403), while the session token from the Keychain /
+    credentials file is. Cheapest authoritative source first, .env last."""
     cred_path = os.path.expanduser("~/.claude/.credentials.json")
     if os.path.exists(cred_path):
         try:
@@ -318,6 +357,10 @@ def _read_claude_token():
                 return token, "credentials_file"
         except Exception:
             pass
+
+    keychain_token = _read_keychain_token()
+    if keychain_token:
+        return keychain_token, "keychain"
 
     if os.path.exists(ENV_PATH):
         try:
@@ -354,7 +397,7 @@ def _collect_claude_authoritative():
     """
     token, token_source = _read_claude_token()
     if not token:
-        return None, "no oauth token available (no credentials.json, no .env token)", "no_token"
+        return None, "no oauth token available (no credentials.json, no keychain entry, no .env token)", "no_token"
 
     version = _claude_cli_version()
     req = urllib.request.Request(
@@ -548,7 +591,7 @@ def build_snapshot():
     now = datetime.now(timezone.utc)
     return {
         "generated_at": now.isoformat(),
-        "generated_at_local": now.astimezone(BUDAPEST).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "generated_at_local": now.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
         "codex": collect_codex(),
         "claude": collect_claude(),
     }

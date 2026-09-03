@@ -124,7 +124,7 @@ def main():
     except Exception:
         sys.exit(0)
 
-    agent_id = ledger_lib.agent_id_from_cwd(payload.get("cwd"))
+    agent_id = ledger_lib.agent_id_from_payload(payload)
 
     try:
         oq = ledger_lib.open_question_with_age(agent_id)
@@ -135,14 +135,20 @@ def main():
         naploz("ATENGED", f"{agent_id}: nincs nyitott kerdes")
         sys.exit(0)  # nothing open, or already answered by a reply-tool call
 
-    # HET ertek jon vissza, nem ot -- a ket csatolmany-mezo (`attachment_kind`, `attachment_file_id`)
-    # kesobb kerult a `ledger_lib.open_question_with_age()` visszateresebe, es ez a kicsomagolas
-    # NEM kovette. Kimerve 2026-08-24: a BLOKKOLO ag `ValueError: too many values to unpack`-kel
-    # elszallt, tehat AZ OR SOHA NEM TUDOTT BLOKKOLNI. Nem hibauzenetkent latszott, hanem
-    # SEMMIKENT: az ATENGED-agak (nincs nyitott kerdes, nyugta, tul regi) sosem ertek el idaig,
-    # es a hook csendben kilepett. Naplo nelkul ez kivulrol megkulonboztethetetlen volt attol,
-    # hogy az or fut es helyesen hallgat.
-    chat_id, message_id, text, ts, created_at, _att_kind, _att_file_id = oq
+    # open_question_with_age() also returns the inbound's attachment columns.
+    # Take only the prefix this hook needs, so the unpack cannot raise (it sits
+    # outside the try above, so a mismatch would kill the hook and the harness
+    # would read the empty stdout as "allow" -- the guard would never block).
+    #
+    # THIS IS NOT HYPOTHETICAL, IT WAS MEASURED HERE (2026-08-24): the fixed-arity
+    # unpack this replaces DID break when the two attachment columns were added.
+    # The blocking branch died with `ValueError: too many values to unpack`, so the
+    # guard COULD NEVER BLOCK -- and it did not look like an error, it looked like
+    # nothing: the allow-branches never reached this line, and the hook exited
+    # quietly. From outside, indistinguishable from a guard running and correctly
+    # staying silent. The slice is what stops that from recurring on the NEXT
+    # column addition.
+    chat_id, message_id, text, ts, created_at = oq[:5]
 
     # Pure acknowledgement -> no reply owed.
     if _is_ack(text):

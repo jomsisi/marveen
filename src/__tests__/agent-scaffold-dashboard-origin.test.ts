@@ -132,6 +132,7 @@ describe('renderHeartbeatClaudeMd: respects dashboardOrigin', () => {
     storeDir: '/srv/app/store',
     dashboardOrigin: 'http://localhost:3420',
     calendarAccount: '',
+    metricsScript: '/srv/app/scripts/heartbeat-metrics.sh',
   }
 
   // The messages endpoint moved to the helper, so the origin is asserted on an

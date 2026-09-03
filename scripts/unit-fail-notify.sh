@@ -27,20 +27,15 @@ if [[ -f "$ENV_FILE" ]]; then
   token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' \r\n')"
 fi
 if [[ -n "$token" && -n "$CHAT_ID" ]]; then
-  # KET HIBA VOLT EBBEN AZ AGBAN, es egyik sem hibauzenetkent jelentkezett:
-  #  1. a sikeres ag NYOMTALAN volt -- egy tiszta lefutas es egy elnyelt hiba
-  #     kivulrol EGYFORMA (csend), tehat a naplobol nem lehetett eldonteni,
-  #     ment-e ki barmi;
-  #  2. a `|| true` mellett a curl exit-kodja amugy sem meres: 0 akkor is, ha a
-  #     Telegram ELUTASITOTTA a kerest. Az egyetlen bizonyitek az `"ok":true`.
-  resp="$(curl -s --max-time 15 \
-    "https://api.telegram.org/bot${token}/sendMessage" \
-    --data-urlencode "chat_id=${CHAT_ID}" \
-    --data-urlencode "text=${msg}" 2>/dev/null)"
-  if [[ "$resp" == *'"ok":true'* ]]; then
-    echo "[unit-fail-notify] ${UNIT}: Telegram sent (ok=true)" >&2
+  # Honest send (NOTIFYVAKSWEEP826): the unit stays best-effort (exit 0 either
+  # way, an OnFailure handler must never itself enter `failed`), but a delivery
+  # failure now lands in the journal instead of vanishing -- this is the script
+  # that reports app crashes, so its own silence was the worst kind.
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/send-telegram.sh"
+  if send_telegram_message "$token" "$CHAT_ID" "$msg"; then
+    echo "[unit-fail-notify] ${UNIT} FAILED notice delivered" >&2
   else
-    echo "[unit-fail-notify] ${UNIT}: Telegram send FAILED -- a valasz: ${resp:-<ures: nincs HTTP valasz>}" >&2
+    echo "[unit-fail-notify] ${UNIT} FAILED but the Telegram notice did NOT deliver (see error above)" >&2
   fi
 else
   # Not silent: name the missing piece so a misconfigured install is diagnosable.

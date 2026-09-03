@@ -775,7 +775,7 @@ function renderActivity(entries) {
           '<span style="display:flex;align-items:center;gap:8px">' +
             modeChip +
             termIcon +
-            '<span class="activity-badge ' + meta.cls + '" title="' + escapeHtml(meta.tip || '') + '">' + meta.label + '</span>' +
+            '<span class="activity-badge ' + meta.cls + '" title="' + escapeHtml(meta.tip || '') + '">' + (a.state === 'working' ? '<span class="act-orb" aria-hidden="true"></span>' : '') + meta.label + '</span>' +
           '</span>' +
         '</div>' +
         (tail
@@ -846,8 +846,8 @@ const columns = document.querySelectorAll('.kanban-col-body')
 // Modal wiring
 document.getElementById('cardModalClose').addEventListener('click', () => closeModal(cardModalOverlay))
 document.getElementById('cardDetailClose').addEventListener('click', () => closeModal(cardDetailOverlay))
-cardModalOverlay.addEventListener('click', (e) => { if (e.target === cardModalOverlay) closeModal(cardModalOverlay) })
-cardDetailOverlay.addEventListener('click', (e) => { if (e.target === cardDetailOverlay) closeModal(cardDetailOverlay) })
+attachOverlayCloseGuard(cardModalOverlay)
+attachOverlayCloseGuard(cardDetailOverlay)
 
 // Add card buttons per column
 document.querySelectorAll('.kanban-add-btn').forEach((btn) => {
@@ -2503,6 +2503,11 @@ const AVATARS = [
 let selectedAvatar = null
 let selectedAvatarFile = null // custom upload chosen in the create wizard (deferred until the agent exists)
 let agents = []
+// Agent name -> measured context-window fraction (0..1), from /api/context-guard.
+// Refreshed alongside the agent list (loadAgents), not on its own poll timer --
+// the underlying measurement reads each agent's transcript from disk, so it is
+// only worth paying for when the Agents page is actually being (re)drawn.
+let contextGuardPct = {}
 let currentAgent = null
 // API-safe agent id for the currently open detail modal. Sub-agents key off
 // their name; the main agent's detail object carries name:'marveen' for legacy
@@ -2536,6 +2541,30 @@ function closeModal(overlay) {
   if (overlay && overlay.id === 'skillModalOverlay') skillModalScope = null
 }
 
+// True if any visible text/textarea field inside the overlay has typed
+// content. Used to gate backdrop-click close so a stray click can't
+// silently discard unsaved input (data loss reported 2026-08-19: a full
+// card description was lost by clicking outside the "Új kártya" modal).
+function overlayHasUnsavedInput(overlay) {
+  const fields = overlay.querySelectorAll(
+    'input[type="text"]:not([list]), input[type="date"], input[type="email"], input[type="url"], textarea',
+  )
+  for (const f of fields) {
+    if (f.offsetParent !== null && f.value && f.value.trim()) return true
+  }
+  return false
+}
+
+// Backdrop click closes the modal only if it has no unsaved input; if it
+// does, a confirm() gates the close so the click has to be deliberate.
+function attachOverlayCloseGuard(overlay) {
+  overlay.addEventListener('click', (e) => {
+    if (e.target !== overlay) return
+    if (overlayHasUnsavedInput(overlay) && !confirm('Van be nem mentett szöveg -- biztosan bezárod mentés nélkül?')) return
+    closeModal(overlay)
+  })
+}
+
 // Wizard open
 addBtn.addEventListener('click', () => {
   resetWizard()
@@ -2549,9 +2578,9 @@ document.getElementById('agentDetailClose').addEventListener('click', () => clos
 document.getElementById('skillModalClose').addEventListener('click', () => closeModal(skillModalOverlay))
 
 // Click-outside-to-close
-agentWizardOverlay.addEventListener('click', (e) => { if (e.target === agentWizardOverlay) closeModal(agentWizardOverlay) })
-agentDetailOverlay.addEventListener('click', (e) => { if (e.target === agentDetailOverlay) closeModal(agentDetailOverlay) })
-skillModalOverlay.addEventListener('click', (e) => { if (e.target === skillModalOverlay) closeModal(skillModalOverlay) })
+attachOverlayCloseGuard(agentWizardOverlay)
+attachOverlayCloseGuard(agentDetailOverlay)
+attachOverlayCloseGuard(skillModalOverlay)
 
 // Close all modals on Escape
 document.addEventListener('keydown', (e) => {
@@ -2689,6 +2718,7 @@ function resetWizard() {
   agentDesc.value = ''
   agentModel.value = 'inherit'
   loadAvailableModels()
+  loadOllamaModels()
   selectedAvatar = null
   selectedAvatarFile = null
   document.querySelectorAll('#avatarGrid .avatar-grid-item').forEach(i => i.classList.remove('selected'))
@@ -2871,13 +2901,23 @@ async function loadAgents() {
     // The federation status fetch is deliberately failure-proof (.catch ->
     // null): it must NEVER take down the Agents page -- including on an
     // older backend where the route 404s.
-    const [agentsRes, marveenRes, fedStatus] = await Promise.all([
+    const [agentsRes, marveenRes, fedStatus, ctxGuard] = await Promise.all([
       fetch('/api/agents'),
       fetch('/api/marveen'),
       fetch('/api/federation/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      // Same failure-proofing as federation status above: an older backend or a
+      // transient error here must not take down the whole Agents page over a
+      // badge.
+      fetch('/api/context-guard').then((r) => (r.ok ? r.json() : null)).catch(() => null),
     ])
     agents = await agentsRes.json()
     if (fedStatus && Array.isArray(fedStatus.peers)) federatedPeerStatus = fedStatus.peers
+    contextGuardPct = {}
+    if (ctxGuard && Array.isArray(ctxGuard.agents)) {
+      for (const g of ctxGuard.agents) {
+        if (typeof g.pct === 'number' && isFinite(g.pct)) contextGuardPct[g.agent] = g.pct
+      }
+    }
     if (marveenRes.ok) {
       window._marveen = await marveenRes.json()
       // A backend CHANNEL_PROVIDER-éhez igazitsuk a kliens-default-ot,
@@ -2901,6 +2941,24 @@ function formatContextTokens(n) {
   if (n < 1000) return `${n} token`
   const k = n / 1000
   return `≈${k < 10 ? k.toFixed(1) : Math.round(k)}k token`
+}
+
+// Small "context window used" badge for an Agents-grid card, sourced from
+// contextGuardPct (populated in loadAgents from /api/context-guard -- the
+// same measurement the context-guard runner itself acts on, so this reads
+// the identical number a [CONTEXT-GUARD] restart would fire on, not a
+// second, potentially-drifting calculation).
+// Empty string when there is nothing to show (guard disabled, agent not
+// running, or the measurement genuinely failed) -- no badge is better than a
+// misleading "0%".
+function contextPctBadgeHtml(agentName) {
+  const pct = contextGuardPct[agentName]
+  if (typeof pct !== 'number' || !isFinite(pct) || pct < 0) return ''
+  const pctRound = Math.round(pct * 100)
+  // Mirrors context-guard's own default tiers (actPct 0.90, hardPct 0.97):
+  // green under act, amber from act to hard, red at/over hard.
+  const tier = pct >= 0.97 ? 'danger' : pct >= 0.90 ? 'warning' : 'ok'
+  return `<span class="agent-ctx-badge ${tier}" title="${escapeHtml(t('agents.context_tip', { pct: pctRound }))}">${pctRound}%</span>`
 }
 
 // Populate the auto-restart controls + context display from an agent payload.
@@ -3216,6 +3274,7 @@ function renderAgents() {
       </div>
       <div class="agent-card-footer">
         <span class="agent-model-badge ${escapeHtml(mainModelClass)}">${escapeHtml(mainModelLabel)}</span>
+        ${contextPctBadgeHtml(mainAgentId())}
         <span class="process-indicator" title="${t('agents.marveen_process_tip')}"><span class="process-dot running"></span>${t('agents.status.running')}</span>
         <span class="tg-status" title="${t('agents.marveen_channel_tip')}"><span class="tg-dot connected"></span>${t('agents.status.online')}</span>
       </div>
@@ -3272,6 +3331,7 @@ function renderAgents() {
       </div>
       <div class="agent-card-footer">
         <span class="agent-model-badge ${escapeHtml(modelClass)}">${escapeHtml(modelLabel)}</span>
+        ${contextPctBadgeHtml(agent.name)}
         <span class="process-indicator" title="${escapeHtml(processTip(isRunning))}"><span class="process-dot ${runDotClass}"></span>${runLabel}</span>
         <span class="tg-status" title="${escapeHtml(channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
       </div>
@@ -3922,19 +3982,33 @@ function switchAgentTab(tab) {
 
 // === Settings save buttons ===
 async function loadOllamaModels() {
-  const group = document.getElementById('ollamaModelGroup')
-  if (!group) return
-  group.innerHTML = ''
+  // Two optgroups, mirroring loadAvailableModels(): one in the agent edit panel
+  // and one in the new-agent wizard. getElementById returns a single node, so
+  // the earlier single-group version could only ever reach the edit panel --
+  // the wizard had no local-model option at all.
+  const groups = [
+    document.getElementById('ollamaModelGroup'),
+    document.getElementById('agentModelOllamaGroup'),
+  ]
+  let models = []
   try {
     const res = await fetch('/api/ollama/models')
-    const models = await res.json()
+    if (res.ok) models = await res.json()
+  } catch { /* Ollama not reachable -- fall through with an empty list */ }
+  if (!Array.isArray(models)) models = []
+  for (const group of groups) {
+    if (!group) continue
+    group.innerHTML = ''
+    // Hide rather than show an empty group, matching loadAvailableModels().
+    if (models.length === 0) { group.style.display = 'none'; continue }
+    group.style.display = ''
     for (const m of models) {
       const opt = document.createElement('option')
       opt.value = m.name
       opt.textContent = `${m.name} (${m.size})`
       group.appendChild(opt)
     }
-  } catch { /* Ollama not available */ }
+  }
 }
 
 // Populates the DeepSeek optgroups in both the wizard and the agent edit
@@ -3966,6 +4040,27 @@ async function loadAvailableModels() {
       }
     }
     if (hint) hint.style.display = deepseekModels.length === 0 ? 'block' : 'none'
+
+    // MiniMax: direct Anthropic-compatible API (no OpenRouter markup), gated
+    // behind MINIMAX_API_KEY same as DeepSeek. Empty array -> hide the group.
+    const minimaxModels = Array.isArray(data.minimax) ? data.minimax : []
+    const editMinimaxGroup = document.getElementById('minimaxModelGroup')
+    const wizardMinimaxGroup = document.getElementById('agentModelMinimaxGroup')
+    for (const group of [editMinimaxGroup, wizardMinimaxGroup]) {
+      if (!group) continue
+      group.innerHTML = ''
+      if (minimaxModels.length === 0) {
+        group.style.display = 'none'
+        continue
+      }
+      group.style.display = ''
+      for (const m of minimaxModels) {
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = m.label
+        group.appendChild(opt)
+      }
+    }
 
     // OpenRouter: two optgroups per select (Auto = weekly-fresh tier
     // recommendation, value `openrouter-auto:<tier>`; Manual = the 2 concrete
@@ -5676,7 +5771,7 @@ document.getElementById('addScheduleBtn').addEventListener('click', () => {
   })
 })
 document.getElementById('scheduleModalClose').addEventListener('click', () => closeModal(scheduleModalOverlay))
-scheduleModalOverlay.addEventListener('click', (e) => { if (e.target === scheduleModalOverlay) closeModal(scheduleModalOverlay) })
+attachOverlayCloseGuard(scheduleModalOverlay)
 
 // Frequency change handler
 // Type toggle (task vs heartbeat)
@@ -6115,7 +6210,7 @@ function renderScheduleList(tasks) {
 
 const scheduleRunHistoryOverlay = document.getElementById('scheduleRunHistoryOverlay')
 document.getElementById('scheduleRunHistoryClose').addEventListener('click', () => closeModal(scheduleRunHistoryOverlay))
-scheduleRunHistoryOverlay.addEventListener('click', (e) => { if (e.target === scheduleRunHistoryOverlay) closeModal(scheduleRunHistoryOverlay) })
+attachOverlayCloseGuard(scheduleRunHistoryOverlay)
 
 const RUN_STATUS_LABEL = {
   fired: () => t('tasks.run_status.fired'),
@@ -6674,7 +6769,7 @@ document.getElementById('memAddBtn').addEventListener('click', () => {
 
 // Close memory modal
 document.getElementById('memModalClose').addEventListener('click', () => closeModal(memModalOverlay))
-memModalOverlay.addEventListener('click', (e) => { if (e.target === memModalOverlay) closeModal(memModalOverlay) })
+attachOverlayCloseGuard(memModalOverlay)
 
 // Save memory (create or edit)
 document.getElementById('saveMemBtn').addEventListener('click', async () => {
@@ -7739,7 +7834,7 @@ document.querySelectorAll('.catalog-filter-btn').forEach(btn => {
 
 // Catalog install modal
 document.getElementById('catalogInstallClose').addEventListener('click', () => closeModal(catalogInstallOverlay))
-catalogInstallOverlay.addEventListener('click', (e) => { if (e.target === catalogInstallOverlay) closeModal(catalogInstallOverlay) })
+attachOverlayCloseGuard(catalogInstallOverlay)
 
 async function loadCatalog() {
   const grid = document.getElementById('catalogGrid')
@@ -7920,8 +8015,8 @@ document.getElementById('addConnectorBtn').addEventListener('click', () => {
 })
 document.getElementById('connectorModalClose').addEventListener('click', () => closeModal(connectorModalOverlay))
 document.getElementById('connectorDetailClose').addEventListener('click', () => closeModal(connectorDetailOverlay))
-connectorModalOverlay.addEventListener('click', (e) => { if (e.target === connectorModalOverlay) closeModal(connectorModalOverlay) })
-connectorDetailOverlay.addEventListener('click', (e) => { if (e.target === connectorDetailOverlay) closeModal(connectorDetailOverlay) })
+attachOverlayCloseGuard(connectorModalOverlay)
+attachOverlayCloseGuard(connectorDetailOverlay)
 
 // Type toggle
 document.getElementById('connectorType').addEventListener('change', () => {
@@ -9896,7 +9991,7 @@ document.getElementById('memImportOpenBtn').addEventListener('click', () => {
 
 // Close import modal
 document.getElementById('memImportClose').addEventListener('click', () => closeModal(memImportOverlay))
-memImportOverlay.addEventListener('click', (e) => { if (e.target === memImportOverlay) closeModal(memImportOverlay) })
+attachOverlayCloseGuard(memImportOverlay)
 
 // File area click -> trigger file input
 memImportFileArea.addEventListener('click', () => memImportFileInput.click())
@@ -10414,7 +10509,7 @@ function formatMtime(ms) {
 }
 
 document.getElementById('skillDetailClose').addEventListener('click', () => closeModal(skillDetailOverlay))
-skillDetailOverlay.addEventListener('click', (e) => { if (e.target === skillDetailOverlay) closeModal(skillDetailOverlay) })
+attachOverlayCloseGuard(skillDetailOverlay)
 
 // Scope for the next skill create/import action. 'global' means the
 // Skills page opened the modal (write to ~/.claude/skills/); any other
@@ -12366,6 +12461,7 @@ populateAvatarGrid()
 loadMemAgents()
 loadOverview()
 loadAvailableModels()
+loadOllamaModels()
 {
   const onbClose = document.getElementById('onboardingClose')
   if (onbClose) onbClose.addEventListener('click', dismissOnboarding)
@@ -14906,6 +15002,7 @@ function renderTuToolStats(data) {
 // Ideas (Ötletláda)
 // ============================================================
 let ideas = []
+let ideasAll = []
 let ideasPromoteId = null
 let ideaEditId = null
 let ideaDetailId = null
@@ -14916,12 +15013,16 @@ async function loadIdeasPage() {
   const statusFilter = document.getElementById('ideaStatusFilter')?.value ?? 'active'
   const categoryFilter = document.getElementById('ideaCategoryFilter')?.value || ''
   const params = new URLSearchParams()
-  // 'active' = new+reviewed, fetched unfiltered then narrowed client-side
-  if (statusFilter && statusFilter !== 'active') params.set('status', statusFilter)
+  // Status narrowing happens client-side on the full fetch: the stats row must
+  // count every status, and a server-side status filter starved it — after the
+  // first promote the "Kanbanban" box showed 0 with the item hidden, which read
+  // as data loss on the first live promote (2026-08-20).
   if (categoryFilter) params.set('category', categoryFilter)
   const [ideasRes, catsRes] = await Promise.all([fetch('/api/ideas?' + params), fetch('/api/ideas/categories')])
-  ideas = await ideasRes.json()
-  if (statusFilter === 'active') ideas = ideas.filter(i => i.status === 'new' || i.status === 'reviewed')
+  ideasAll = await ideasRes.json()
+  if (statusFilter === 'active') ideas = ideasAll.filter(i => i.status === 'new' || i.status === 'reviewed')
+  else if (statusFilter) ideas = ideasAll.filter(i => i.status === statusFilter)
+  else ideas = ideasAll
   const cats = await catsRes.json()
   const catSel = document.getElementById('ideaCategoryFilter')
   if (catSel) {
@@ -14934,7 +15035,7 @@ async function loadIdeasPage() {
 
 function renderIdeasStats() {
   const counts = { new: 0, reviewed: 0, kanban: 0, rejected: 0 }
-  for (const i of ideas) counts[i.status] = (counts[i.status] || 0) + 1
+  for (const i of ideasAll) counts[i.status] = (counts[i.status] || 0) + 1
   const el = document.getElementById('ideasStats')
   if (!el) return
   el.innerHTML = Object.entries(counts).map(([s, n]) =>
@@ -16380,7 +16481,7 @@ async function openResearchDoc(agent, name) {
       if (backBtn) backBtn.addEventListener('click', () => switchPage('kanban'))
       const adOverlay = document.getElementById('archivedDetailOverlay')
       document.getElementById('archivedDetailClose').addEventListener('click', () => closeModal(adOverlay))
-      adOverlay.addEventListener('click', e => { if (e.target === adOverlay) closeModal(adOverlay) })
+      attachOverlayCloseGuard(adOverlay)
     }
     populateArchivedProjects()
     doArchivedSearch()

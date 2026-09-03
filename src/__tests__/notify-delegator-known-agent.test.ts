@@ -21,6 +21,12 @@ vi.mock('../web/agent-config.js', () => ({
 
 const { shouldNotifyDelegator } = await import('../web/routes/messages.js')
 
+// Adapter, not a re-implementation: upstream changed the signature to three plain
+// strings so the rule can be exercised without building an AgentMessage. This
+// unpacks the fixture and passes them through -- every assertion below is the one
+// that was here before, unchanged.
+const notify = (m: AgentMessage) => shouldNotifyDelegator(m.from_agent, m.to_agent, m.content)
+
 function msg(from: string, to: string, content: string): AgentMessage {
   return {
     id: 1, from_agent: from, to_agent: to, content,
@@ -32,21 +38,21 @@ describe('shouldNotifyDelegator', () => {
   it('notifies a real agent -- POSITIVE CONTROL, without this the rest proves nothing', () => {
     // Ha ez nincs itt, a fajl ugyanigy zold lenne akkor is, ha a fuggveny MINDIG false-t adna --
     // es akkor egy zajos hurkot csereltunk volna nema delegalasra.
-    expect(shouldNotifyDelegator(msg('sanyiba', 'boss', 'Kerlek nezd at'))).toBe(true)
+    expect(notify(msg('sanyiba', 'boss', 'Kerlek nezd at'))).toBe(true)
   })
 
   it('stays silent when the sender is the `system` pseudo-agent (the self-sustaining chain)', () => {
-    expect(shouldNotifyDelegator(msg('system', 'boss', 'Uj csapattag erkezett: safar'))).toBe(false)
+    expect(notify(msg('system', 'boss', 'Uj csapattag erkezett: safar'))).toBe(false)
   })
 
   it('stays silent for a handoff-failure notice -- it does not start with the sentinel', () => {
     const m = msg('system', 'boss', '[handoff-failure] Inter-agent message (id 974) ...')
     expect(m.content.startsWith('[Eredmény]')).toBe(false) // EZ engedte at a regi szuron
-    expect(shouldNotifyDelegator(m)).toBe(false)
+    expect(notify(m)).toBe(false)
   })
 
   it('keeps the two older guards: self-message and completion report', () => {
-    expect(shouldNotifyDelegator(msg('boss', 'boss', 'sajat magamnak'))).toBe(false)
-    expect(shouldNotifyDelegator(msg('sanyiba', 'boss', '[Eredmény] msg_id:42 status:done'))).toBe(false)
+    expect(notify(msg('boss', 'boss', 'sajat magamnak'))).toBe(false)
+    expect(notify(msg('sanyiba', 'boss', '[Eredmény] msg_id:42 status:done'))).toBe(false)
   })
 })
