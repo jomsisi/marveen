@@ -285,6 +285,13 @@ export const KANBAN_WIP_OVER_COLOR = env['KANBAN_WIP_OVER_COLOR'] ?? '#c53030'
 // requiresRestart registry keys: read through the override layer so a value
 // saved on the Settings page takes effect on the next restart.
 export const DASHBOARD_PUBLIC_URL = cfg('DASHBOARD_PUBLIC_URL') ?? ''
+// Public base URL for the credential-entry links ONLY (src/web/routes/vault-entry.ts).
+// Kept SEPARATE from DASHBOARD_PUBLIC_URL on purpose: DASHBOARD_PUBLIC_URL also
+// feeds the generated agent CLAUDE.md API base, so pointing it at the Tailscale
+// Funnel host (which exposes ONLY /vault-entry, not /api) would rewrite every
+// agent's API curl to a 404-ing URL. This var affects nothing but the minted
+// entry-link host.
+export const VAULT_ENTRY_BASE_URL = cfg('VAULT_ENTRY_BASE_URL') ?? ''
 // Extra browser origins allowed to make state-changing dashboard requests
 // (CORS + CSRF allowlist), comma-separated, e.g. for VPN/LAN addresses that
 // aren't covered by WEB_HOST or DASHBOARD_PUBLIC_URL. Empty by default so
