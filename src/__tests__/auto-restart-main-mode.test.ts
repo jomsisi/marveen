@@ -54,22 +54,26 @@ describe('mainAgentModeIsFresh', () => {
 // SILENTLY DELETE the sentinel. The two changes were approved separately and,
 // put in the wrong place, cancel each other. That is what these tests pin.
 describe('write-side only (the sentinel depends on it)', () => {
+  // Word-bounded on purpose. A plain substring check passes for a RENAMED
+  // identifier that merely starts with the old name (warnIfMainModeIgnoredX
+  // contains warnIfMainModeIgnored), which is how the first version of this
+  // control survived a rename mutation while the code no longer compiled.
   it('positive control: the comment stripper left the functions intact', () => {
-    expect(STORE).toContain('export function writeAutoRestartConfig')
-    expect(STORE).toContain('export function readAutoRestartConfig')
-    expect(RUNNER).toContain('function warnIfMainModeIgnored')
+    expect(STORE).toMatch(/export function writeAutoRestartConfig\s*\(/)
+    expect(STORE).toMatch(/export function readAutoRestartConfig\s*\(/)
+    expect(RUNNER).toMatch(/function warnIfMainModeIgnored\s*\(/)
   })
 
   it('the write path normalizes the main agent row', () => {
     const body = STORE.split('export function writeAutoRestartConfig')[1] ?? ''
     expect(body.length, 'writeAutoRestartConfig body not found').toBeGreaterThan(40)
-    expect(body.split('\n}')[0]).toContain('mainAgentModeIsFresh')
+    expect(body.split('\n}')[0]).toMatch(/\bmainAgentModeIsFresh\s*\(/)
   })
 
   it('the read path does NOT normalize -- that would kill the runner warning', () => {
     const body = (STORE.split('export function readAutoRestartConfig')[1] ?? '').split('\n}')[0]
     expect(body.length, 'readAutoRestartConfig body not found').toBeGreaterThan(40)
-    expect(body).not.toContain('mainAgentModeIsFresh')
+    expect(body).not.toMatch(/\bmainAgentModeIsFresh\s*\(/)
   })
 
   it('the runner warns before the enabled-guard, not only when a restart is due', () => {
