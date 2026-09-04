@@ -151,7 +151,14 @@ export function shouldNotifyFailedSender(fromAgent: string): boolean {
   return isKnownAgent(fromAgent)
 }
 
-function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): void {
+/**
+ * EXPORTED FOR THE TEST, AND THE REASON IS NOT CONVENIENCE. The predicate above
+ * can be measured on its own, but a green predicate says nothing about whether
+ * anything CALLS it: boss removed the call block on 2026-09-04 as a mutation and
+ * the whole suite stayed green (7/7). The rule lives in the CALLER, so the
+ * caller is what has to be exercised. See failed-handoff-notifies-sender.test.ts.
+ */
+export function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): void {
   try {
     // A failed message to the main agent can't happen (pull model), but guard
     // anyway so we never loop a notification back onto itself.

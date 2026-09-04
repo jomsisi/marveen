@@ -44,6 +44,12 @@ vi.mock('../config.js', async (orig) => ({
 
 const { shouldNotifyFailedSender } = await import('../web/message-router.js')
 
+/** Minimal AgentMessage fixture -- only the fields the notifier reads. */
+function failed(from: string, to: string): any {
+  return { id: 4989, from_agent: from, to_agent: to, content: 'proba', status: 'failed',
+           result: null, created_at: 0, delivered_at: null, completed_at: null, origin_note: null }
+}
+
 describe('THE LOOP BRANCH FIRST: a notice must never be addressed to a party with no session', () => {
   it('does not notify the `system` pseudo-sender', () => {
     // `system` posts new-teammate notices and handoff-failure warnings but owns
@@ -100,5 +106,58 @@ describe('the decision CANNOT depend on the recipient', () => {
     // A one-parameter function cannot develop that dependency at all, so the
     // ARITY is the guarantee -- and this is what pins it.
     expect(shouldNotifyFailedSender.length).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AND THE WIRING, BECAUSE A GREEN PREDICATE IS NOT A DELIVERED NOTICE.
+//
+// Every assertion above measures the DECISION. Boss mutated the other axis on
+// 2026-09-04: he deleted the call block from notifyOrchestratorOfFailedHandoff
+// and left shouldNotifyFailedSender exported but unreferenced. The sender would
+// then never be told -- and all seven assertions above stayed GREEN.
+//
+// That is this repo's `szabaly-a-hivoban` shape: the rule lives in the caller,
+// and a test that only exercises the library cannot see the caller disappear.
+// A later refactor, or a merge conflict resolved the wrong way (we spent today
+// inside one), removes the block without a single red test.
+//
+// So these assert on the CALLS, through a mocked createAgentMessage. They fail
+// the moment the wiring goes, whatever shape the predicate is left in.
+describe('THE WIRING: the caller actually addresses the sender', () => {
+  it('writes BOTH notices -- the orchestrator one and the sender one', async () => {
+    const calls: Array<[string, string, string]> = []
+    vi.doMock('../db.js', async (orig) => ({
+      ...(await orig<Record<string, unknown>>()),
+      createAgentMessage: (from: string, to: string, content: string) => { calls.push([from, to, content]); return 1 },
+    }))
+    vi.resetModules()
+    const { notifyOrchestratorOfFailedHandoff } = await import('../web/message-router.js')
+
+    notifyOrchestratorOfFailedHandoff(failed('sanyiba', 'nincs-ilyen-agens'), 'target session absent')
+
+    const recipients = calls.map(([, to]) => to)
+    expect(recipients).toContain('boss')      // the orchestrator notice, as before
+    expect(recipients).toContain('sanyiba')   // the sender notice -- what this change adds
+    // Both are written by the `system` pseudo-sender, which is what keeps them
+    // local and un-forwardable across the federation bridge.
+    expect(calls.every(([from]) => from === 'system')).toBe(true)
+  })
+
+  it('writes ONLY the orchestrator notice when the sender cannot be told', async () => {
+    // The loop branch again, but at the wiring level: the guard has to be
+    // consulted HERE, not merely exist. Without this, a caller that ignores the
+    // predicate would reopen the 2026-08-10 chain with the unit tests green.
+    const calls: Array<[string, string, string]> = []
+    vi.doMock('../db.js', async (orig) => ({
+      ...(await orig<Record<string, unknown>>()),
+      createAgentMessage: (from: string, to: string, content: string) => { calls.push([from, to, content]); return 1 },
+    }))
+    vi.resetModules()
+    const { notifyOrchestratorOfFailedHandoff } = await import('../web/message-router.js')
+
+    notifyOrchestratorOfFailedHandoff(failed('system', 'sanyiba'), 'target session absent')
+
+    expect(calls.map(([, to]) => to)).toEqual(['boss'])
   })
 })
