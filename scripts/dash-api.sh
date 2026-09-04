@@ -53,6 +53,25 @@ if ! printf '%s' "$BODY" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>
   exit 1
 fi
 
+# Cyrillic homoglyphs in Hungarian prose: a WARNING, never a refusal. Measured 2026-09-02: 34 of them
+# sat unnoticed across 23 memory pages and skills, and one was inside a grep pattern -- they cause
+# NO-MATCH later, not an error now, so nothing else in the pipeline can catch them. The body is still
+# sent: a cosmetic character must never block a write that is otherwise correct.
+HOMOGLYPHS="$(printf '%s' "$BODY" | python3 -c '
+import sys,re
+s=sys.stdin.read()
+# A TELJES cirill blokk (U+0400-U+04FF), NEM egy kezzel osszeszedett hasonlosag-lista.
+# MIERT: az elso valtozat 21 karaktert sorolt fel -- azokat, amiket a 2026-09-02-i takaritasban
+# TALALTAM. Ugyanaznap 12:5x-kor egy `konteneг` (U+0433) NEMAN atment rajta, mert nem volt a
+# listan. A kapu celja nem a "hasonlit-e" eldontese, hanem hogy a szo egy kesobbi grepre
+# ELOJON-E: ahhoz BARMELY cirill betu eleg egy egyebkent latin szoban.
+w=sorted({m for m in re.findall(r"\S*[\u0400-\u04FF]\S*", s)})
+print(" ".join(w[:6]))' 2>/dev/null)"
+if [ -n "$HOMOGLYPHS" ]; then
+  echo "WARN: cyrillic homoglyph(s) in the body -- sending anyway, but these will NOT be found by a" >&2
+  echo "      later grep/search: $HOMOGLYPHS" >&2
+fi
+
 TOKEN="$(cat "$TOKEN_FILE")"
 RESP="$(curl -s -X "$METHOD" "http://localhost:${PORT}${API_PATH}" \
         -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \

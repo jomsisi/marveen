@@ -59,6 +59,23 @@ if [ "$C" != "-" ] || [ "$#" -gt 3 ]; then
   exit 1
 fi
 C="$(cat)"
+
+# Cyrillic homoglyphs -- a WARNING, never a refusal. Same gate as scripts/dash-api.sh, lifted here
+# 2026-09-02 after michel measured the gap: that script had the check, these two did NOT, and the
+# INTER-AGENT path is where most of our technical text travels (command names, card ids, file paths).
+# A Cyrillic letter inside an id or a command produces a NO-MATCH later, not an error now, so nothing
+# else in the pipeline can catch it. The text is still sent: a cosmetic character must never block a
+# message that is otherwise correct.
+HOMOGLYPHS="$(printf '%s' "$C" | python3 -c '
+import sys,re
+s=sys.stdin.read()
+w=sorted({m for m in re.findall(r"\S*[\u0400-\u04FF]\S*", s)})
+print(" ".join(w[:6]))' 2>/dev/null)"
+if [ -n "$HOMOGLYPHS" ]; then
+  echo "WARN: cyrillic homoglyph(s) in the message -- sending anyway, but these will NOT be found by a" >&2
+  echo "      later grep/search: $HOMOGLYPHS" >&2
+fi
+
 [ -r "$TOKEN_FILE" ] || { echo "FAIL: no token file at $TOKEN_FILE"; exit 1; }
 TOKEN="$(cat "$TOKEN_FILE")"
 

@@ -60,6 +60,24 @@ case "$ID" in ''|*[!0-9]*) echo "FAIL: id must be numeric (got: $ID)" >&2; exit 
 [ -r "$TOKEN_FILE" ] || { echo "FAIL: no token file at $TOKEN_FILE" >&2; exit 1; }
 
 RESULT="$(cat)"
+
+# Cyrillic homoglyphs -- a WARNING, never a refusal. Same gate as scripts/dash-api.sh, lifted here
+# 2026-09-02 after michel measured the gap: that script had the check, these two did NOT, and the
+# INTER-AGENT path is where most of our technical text travels (command names, card ids, file paths).
+# A Cyrillic letter inside an id or a command produces a NO-MATCH later, not an error now, so nothing
+# else in the pipeline can catch it. The measured case: a close body reading "mind a h<cyr>rmat", three
+# Cyrillic letters, sent and stored with nobody warned. The text is still sent: a cosmetic character
+# must never block a message that is otherwise correct.
+HOMOGLYPHS="$(printf '%s' "$RESULT" | python3 -c '
+import sys,re
+s=sys.stdin.read()
+w=sorted({m for m in re.findall(r"\S*[\u0400-\u04FF]\S*", s)})
+print(" ".join(w[:6]))' 2>/dev/null)"
+if [ -n "$HOMOGLYPHS" ]; then
+  echo "WARN: cyrillic homoglyph(s) in the text -- sending anyway, but these will NOT be found by a" >&2
+  echo "      later grep/search: $HOMOGLYPHS" >&2
+fi
+
 TOKEN="$(cat "$TOKEN_FILE")"
 
 # json.dumps builds the body from the environment -- the text never passes through shell quoting.
