@@ -107,6 +107,21 @@ describe('ZONE A -- the generated autonomy block calls the helpers by absolute p
     expect(written).not.toMatch(RELATIVE_HELPER_CALL)
   })
 
+  it('points at the autonomy config by absolute path too', () => {
+    const file = writeAgentFile('agent-e', '# agent-e\n')
+    ensureAutonomySection('agent-e')
+    const written = readFileSync(file, 'utf-8')
+
+    // The eighth site, and the one that reads least like a path bug: the block
+    // does not merely mention store/autonomy-config.json, it DIRECTS the agent
+    // to open it before acting. From agents/<name>/ the relative form is not
+    // there, and the failure is silent -- the agent proceeds without knowing
+    // which of the three autonomy levels applies, which is the single thing
+    // this block exists to prevent.
+    expect(written).toContain(join(tmpRoot, 'store', 'autonomy-config.json'))
+    expect(written).not.toContain('a store/autonomy-config.json szabályozza')
+  })
+
   it('roots the paths in PROJECT_ROOT rather than a baked-in install path', () => {
     const file = writeAgentFile('agent-d', '# agent-d\n')
     ensureAutonomySection('agent-d')
@@ -154,7 +169,17 @@ describe('ZONE B -- the new-agent prompt template teaches absolute helper paths'
   })
 })
 
-describe('the interpolated constants exist and are rooted at the install', () => {
+// NOT A STANDALONE CHECK -- THIS IS THE SECOND HALF OF ZONE B, AND REMOVING IT
+// WOULD SILENTLY GUT THE FIRST. Zone B asserts on the SOURCE TEXT (that the
+// prompt contains the literal `bash ${scriptsDir}/dash-api.sh`), because the
+// prompt only becomes a file by way of the LLM; it therefore says nothing about
+// what `scriptsDir` RESOLVES TO. Measured by boss on 2026-09-04, mutating the
+// value rather than the text: `scriptsDir` set to an empty prefix failed three
+// zone A tests and this block, while ZONE B STAYED GREEN. So zone B's guarantee
+// is a conjunction of the two describes -- anyone who reads this one as a
+// duplicate of the type checker and deletes it leaves zone B green for any
+// value of scriptsDir at all.
+describe('the interpolated constants exist and are rooted at the install (ZONE B, part 2)', () => {
   const src = readFileSync(SCAFFOLD_PATH, 'utf-8')
 
   it('declares scriptsDir from PROJECT_ROOT', () => {

@@ -36,6 +36,20 @@ const tokenPath = join(PROJECT_ROOT, 'store', '.dashboard-token')
 // One agent appeared to work; his commands happened to start with `cd <root> &&`
 // out of habit. A rule kept by an accidental habit is not kept.
 const scriptsDir = join(PROJECT_ROOT, 'scripts')
+// The autonomy config the generated block tells the agent to CONSULT before
+// acting. Absolute for the same reason as the two above, and it is the reading
+// instruction that makes it matter: "nezd meg az adott kategoria szintjet" is a
+// directive, not a mention, and from agents/<name>/ the relative form points at
+// a file that is not there. An agent that cannot read its own autonomy levels
+// does not fail loudly -- it just proceeds without knowing which of the three
+// levels applies, which is the failure this block exists to prevent.
+//
+// PROJECT_ROOT rather than STORE_DIR, though the two are equal by definition
+// (config.ts: STORE_DIR = join(PROJECT_ROOT, 'store')): tokenPath above already
+// set that precedent, and every test in this suite mocks PROJECT_ROOT while
+// most omit STORE_DIR -- an undefined prefix would render as
+// "undefined/autonomy-config.json" and pass unnoticed.
+const autonomyConfigPath = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
 
 // Hook commands run under `/bin/sh -c` with a NON-interactive PATH. On nvm
 // installs a bare `node` is not on that PATH, so the hook exits 127 -- which
@@ -862,7 +876,7 @@ function buildAutonomyBody(name: string): string {
   return [
     '## Autonómia és jóváhagyás',
     '',
-    'Az autonóm műveletek fokozatait a store/autonomy-config.json szabályozza (level: 1=csak jelez, 2=javasol+jóváhagyás, 3=autonóm+jelent). Mielőtt önállóan cselekszel, nézd meg az adott kategória szintjét.',
+    `Az autonóm műveletek fokozatait a ${autonomyConfigPath} szabályozza (level: 1=csak jelez, 2=javasol+jóváhagyás, 3=autonóm+jelent). Mielőtt önállóan cselekszel, nézd meg az adott kategória szintjét.`,
     '',
     '**Level 1 (csak jelez)**: küldj inter-agent értesítést a főágensnek, de NE végezd el a műveletet. Ezután ÁLLJ MEG.',
     `cat <<'MSG' | bash ${scriptsDir}/agent-msg.sh ${name} ${MAIN_AGENT_ID} -`,
