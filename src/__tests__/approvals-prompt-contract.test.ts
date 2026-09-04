@@ -26,7 +26,18 @@ describe('agent-scaffold.ts buildAutonomyBody: approval wiring content', () => {
   })
 
   it('references autonomy-config.json so agents know where to read the level', () => {
-    expect(AUTONOMY_FN).toContain('autonomy-config.json')
+    // The filename moved OUT of this slice on 2026-09-04 and that is the fix,
+    // not a regression: the block used to name it relatively
+    // (store/autonomy-config.json), which does not resolve from an agent's cwd
+    // of agents/<name>/, so the very instruction this test protects -- go read
+    // your level -- pointed at a file that was not there. It is now emitted
+    // through the module-level `autonomyConfigPath`, which is absolute.
+    //
+    // This assertion therefore pins the REFERENCE, and the filename it resolves
+    // to is pinned where it now lives: agent-scaffold-absolute-helper-paths.
+    // test.ts asserts, behaviourally, that the written block contains
+    // <PROJECT_ROOT>/store/autonomy-config.json.
+    expect(AUTONOMY_FN).toContain('${autonomyConfigPath}')
   })
 
   it('level 1 rule says notify and stop -- not queue an approval', () => {

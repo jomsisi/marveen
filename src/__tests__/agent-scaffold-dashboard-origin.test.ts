@@ -101,11 +101,23 @@ describe('generateClaudeMd prompt: no hardcoded localhost:3420', () => {
   // a non-default port. Here we only pin that the write goes through the helper
   // rather than being rebuilt as a literal curl, which is what would silently
   // reintroduce a hardcoded port.
+  //
+  // THE DIRECTORY PREFIX IS DELIBERATELY UNPINNED HERE (loosened 2026-09-04).
+  // This assertion used to read `bash scripts/dash-api.sh POST ${path}`, which
+  // pinned the RELATIVE path as a side effect of pinning the helper. The
+  // relative form was itself a bug -- agents run from agents/<name>/, where
+  // that file does not exist -- so the fix made the prompt emit
+  // `bash ${scriptsDir}/dash-api.sh`, and this test failed for naming a
+  // property it never meant to guarantee. Its own guarantee, stated above, is
+  // "through the helper, not a rebuilt curl", and that is untouched.
+  // WHERE THE DROPPED CONSTRAINT LIVES NOW, so loosening here loses nothing:
+  // agent-scaffold-absolute-helper-paths.test.ts asserts that the path IS
+  // absolute and IS rooted in PROJECT_ROOT, in both generated zones.
   it.each([
     ['daily-log', '/api/daily-log'],
     ['schedules', '/api/schedules'],
   ])('routes the %s write through dash-api.sh, not a rebuilt curl', (_label, path) => {
-    expect(fnBody).toContain(`bash scripts/dash-api.sh POST ${path}`)
+    expect(fnBody).toMatch(new RegExp(String.raw`bash \S*dash-api\.sh POST ${path}`))
     expect(fnBody).not.toContain(`-X POST http://localhost:3420${path}`)
   })
 
