@@ -17,7 +17,7 @@ import {
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
-import { readAgentRemoteHost, readAgentVoiceConfig } from './agent-config.js'
+import { isKnownAgent, readAgentRemoteHost, readAgentVoiceConfig } from './agent-config.js'
 import {
   agentSessionName,
   isSessionReadyForPrompt,
@@ -116,6 +116,41 @@ function notifyOrchestratorOfStuckSession(agent: string, session: string, stuckM
   }
 }
 
+/**
+ * Pure decision: may the SENDER of a failed message be told that it failed?
+ *
+ * WHY THE SENDER NEEDS TELLING AT ALL. Until 2026-09-04 only the main agent
+ * learned about an abandoned local handoff, so the sender had no way to find
+ * out alone -- measured on message 4989 (sanyiba -> a non-existent recipient):
+ * the endpoint returned HTTP 200 with an id, the send looked successful by our
+ * own contract, and the `[handoff-failure]` went to boss an hour later. This is
+ * an ASYMMETRY, not a missing mechanism: the FEDERATED path has told the sender
+ * since it was written (notifyDelegationFailed), the local path never did.
+ *
+ * TAKES THE SENDER ONLY, ON PURPOSE. The question is "can this party be told",
+ * not "who was the message for", and a function that never receives the
+ * recipient cannot start depending on it in a later edit.
+ *
+ * THE TWO EXCLUSIONS ARE BOTH LOAD-BEARING:
+ *
+ *   MAIN_AGENT_ID -- already receives the orchestrator notice for this same
+ *     event. A second copy is noise in the one inbox that reads everything, and
+ *     noise there is how a real handoff-failure stops being read.
+ *
+ *   not a known agent -- `system`, a removed agent, an empty name. A notice
+ *     addressed to a party with no session can NEVER be delivered: the router
+ *     burns the whole retry window and emits another handoff-failure, which
+ *     would try to notify ITS sender, and so on. That chain is not theoretical;
+ *     it ran on the live boss inbox on 2026-08-10 (973 -> 974 -> 1005, kanban
+ *     f0601aff), and notify-delegator-known-agent.test.ts exists because of it.
+ *     Note isKnownAgent(MAIN_AGENT_ID) is true, so the main-agent check must
+ *     come FIRST or it would never fire.
+ */
+export function shouldNotifyFailedSender(fromAgent: string): boolean {
+  if (fromAgent === MAIN_AGENT_ID) return false
+  return isKnownAgent(fromAgent)
+}
+
 function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): void {
   try {
     // A failed message to the main agent can't happen (pull model), but guard
@@ -128,6 +163,23 @@ function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): v
       `[handoff-failure] Inter-agent message (id ${msg.id}) ${msg.from_agent} -> ${msg.to_agent} could NOT be delivered: ${reason}. Consider re-sending or checking the target agent. Content preview: ${preview}`,
     )
     logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, reason }, 'handoff-failure surfaced to orchestrator')
+    // AND THE SENDER, who otherwise never finds out. Separate try/catch on
+    // purpose: if the sender notice cannot be created, the orchestrator one has
+    // already been written, and losing both to one throw is the worse outcome.
+    if (shouldNotifyFailedSender(msg.from_agent)) {
+      try {
+        createAgentMessage(
+          'system',
+          msg.from_agent,
+          `A(z) ${msg.to_agent} címre küldött üzeneted (#${msg.id}) NEM érkezett meg: ${reason}. ` +
+          'A küldés HTTP 200-zal és id-vel tért vissza, tehát sikeresnek látszott -- ez az értesítés az egyetlen jelzés. ' +
+          'Ellenőrizd a címzett nevét, és ne építs döntést arra, hogy az üzenet odaért.',
+        )
+        logger.info({ id: msg.id, sender: msg.from_agent }, 'handoff-failure also surfaced to sender')
+      } catch (err) {
+        logger.warn({ err, id: msg.id, sender: msg.from_agent }, 'sender handoff-failure notice could not be created')
+      }
+    }
   } catch (err) {
     logger.warn({ err, id: msg.id }, 'Failed to enqueue handoff-failure notification')
   }
