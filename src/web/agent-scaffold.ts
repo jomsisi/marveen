@@ -26,6 +26,16 @@ const dashboardOrigin = resolveDashboardOrigin(DASHBOARD_PUBLIC_URL, WEB_PORT)
 // and every call 401s silently. Measured 2026-07-25: relative 401, absolute
 // 200; this had been silently killing sub-agent memory saves and searches.
 const tokenPath = join(PROJECT_ROOT, 'store', '.dashboard-token')
+// Helper-script paths emitted into generated CLAUDE.md examples. ABSOLUTE for
+// the same reason as tokenPath, and the failure is the same shape one level up:
+// agents run with cwd = agents/<name>/, where `scripts/dash-api.sh` does not
+// exist ("Nincs ilyen fajl vagy konyvtar"). Measured 2026-09-02 across all five
+// agents -- 24 relative call sites, zero of the five agent directories holding
+// the helper. That the `scripts/` DIRECTORY exists under four of them is what
+// makes the bug survive a casual check: it is there, with different contents.
+// One agent appeared to work; his commands happened to start with `cd <root> &&`
+// out of habit. A rule kept by an accidental habit is not kept.
+const scriptsDir = join(PROJECT_ROOT, 'scripts')
 
 // Hook commands run under `/bin/sh -c` with a NON-interactive PATH. On nvm
 // installs a bare `node` is not on that PATH, so the hook exits 127 -- which
@@ -855,14 +865,14 @@ function buildAutonomyBody(name: string): string {
     'Az autonóm műveletek fokozatait a store/autonomy-config.json szabályozza (level: 1=csak jelez, 2=javasol+jóváhagyás, 3=autonóm+jelent). Mielőtt önállóan cselekszel, nézd meg az adott kategória szintjét.',
     '',
     '**Level 1 (csak jelez)**: küldj inter-agent értesítést a főágensnek, de NE végezd el a műveletet. Ezután ÁLLJ MEG.',
-    `cat <<'MSG' | bash scripts/agent-msg.sh ${name} ${MAIN_AGENT_ID} -`,
+    `cat <<'MSG' | bash ${scriptsDir}/agent-msg.sh ${name} ${MAIN_AGENT_ID} -`,
     '[FELHÍVÁS] CATEGORY_KEY: MIT akartam elvégezni, de level 1 miatt csak jelzek.',
     'MSG',
     '',
     '**Level 2 (jóváhagyás szükséges)**: kérj jóváhagyást az API-n MIELŐTT cselekszel.',
     '',
     'Jóváhagyás kérése (POST):',
-    `cat <<'JSON' | bash scripts/dash-api.sh POST /api/approvals`,
+    `cat <<'JSON' | bash ${scriptsDir}/dash-api.sh POST /api/approvals`,
     `{"agent_id":"${name}","category":"CATEGORY_KEY","action_description":"Mit tervezel elvégezni és miért","timeout_seconds":3600}`,
     'JSON',
     'A válaszban kapott id-vel kérdezheted le a döntést.',
@@ -991,15 +1001,15 @@ A memoria 3 retegbol all (hot/warm/cold) + napi naplo.
 
 ### NINCS MENTAL NOTE! Ha meg kell jegyezni -> AZONNAL mentsd:
 
-Minden /api/* végpont Bearer tokenes: a token a store/.dashboard-token fájlban.
+Minden /api/* végpont Bearer tokenes: a token a ${tokenPath} fájlban.
 
 Memória mentés:
-cat <<'JSON' | bash scripts/dash-api.sh POST /api/memories
+cat <<'JSON' | bash ${scriptsDir}/dash-api.sh POST /api/memories
 {"agent_id":"AGENT_NAME","content":"MIT","category":"CATEGORY","keywords":"kulcsszo1, kulcsszo2"}
 JSON
 
 Napi napló (append-only):
-cat <<'JSON' | bash scripts/dash-api.sh POST /api/daily-log
+cat <<'JSON' | bash ${scriptsDir}/dash-api.sh POST /api/daily-log
 {"agent_id":"AGENT_NAME","content":"## Tema\nMi tortent, mi lett az eredmeny"}
 JSON
 
@@ -1021,7 +1031,7 @@ curl -s -H "Authorization: Bearer $(cat ${tokenPath})" "${dashboardOrigin}/api/m
 Az ütemezett feladatok a ~/.claude/scheduled-tasks/ mappában élnek, fájl-alapúak (SKILL.md + task-config.json). A schedule runner 60 másodpercenként ellenőrzi és a te tmux session-ödbe küldi a promptot.
 
 Feladat létrehozása API-n keresztül:
-cat <<'JSON' | bash scripts/dash-api.sh POST /api/schedules
+cat <<'JSON' | bash ${scriptsDir}/dash-api.sh POST /api/schedules
 {"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt", "schedule": "0 8 * * *", "agent": "AGENT_NAME", "type": "heartbeat"}
 JSON
 
@@ -1094,7 +1104,7 @@ Ha egy senderId üzen a csatornán AKIT EDDIG NEM ISMERSZ — nem szerepel az ak
 Az AGENT TULAJDONOSA (az első, aki ezt az ügynököt telepítette és párosította) az ALAPÉRTELMEZETT engedélyezett sender — őt nem kell ellenőrizni. MINDEN további senderId első üzenete (a 2., 3., stb. párosított személy vagy csoport) pinging-trigger.
 
 Példa ping ${BOT_NAME}-nek (a szöveg KÖTELEZŐEN STDIN-en megy — argumentumban a shell átírná):
-cat <<'MSG' | bash scripts/agent-msg.sh AGENT_NAME ${MAIN_AGENT_ID} -
+cat <<'MSG' | bash ${scriptsDir}/agent-msg.sh AGENT_NAME ${MAIN_AGENT_ID} -
 Ismeretlen sender [ID] jelezett első üzenettel: '[üzenet röviden]'. Ki ez, mit válaszoljak?
 MSG
 
