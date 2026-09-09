@@ -57,7 +57,7 @@ describe('a jel maga: a transzkript NEVE valtozik, az MTIME-ja nem elegendo', ()
   function projektMappa(): { root: string; dir: string; workingDir: string } {
     const root = mkdtempSync(join(tmpdir(), 'guard-restart-'))
     const workingDir = '/root/pelda-agens'
-    const dir = join(root, 'projects', workingDir.replace(/\//g, '-'))
+    const dir = join(root, 'projects', workingDir.replace(/[/.]/g, '-'))
     mkdirSync(dir, { recursive: true })
     return { root, dir, workingDir }
   }

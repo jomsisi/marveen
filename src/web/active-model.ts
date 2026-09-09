@@ -141,6 +141,20 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
  * the newest file; this exposes it rather than recomputing the selection
  * differently, so the two always describe the SAME transcript.
  */
+export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?: string): number | null {
+  try {
+    const dir = projectsDirFor(workingDir, configDir)
+    if (!existsSync(dir)) return null
+    let newest: number | null = null
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue
+      const m = statSync(join(dir, f)).mtimeMs
+      if (newest === null || m > newest) newest = m
+    }
+    return newest
+  } catch { return null }
+}
+
 /**
  * The NAME (session id) of the newest transcript for a working dir, or null.
  *
@@ -172,19 +186,5 @@ export function readNewestTranscriptNameFromProjectDir(workingDir: string, confi
       if (newest === null || m > newest.mtime) newest = { name: f, mtime: m }
     }
     return newest ? newest.name : null
-  } catch { return null }
-}
-
-export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?: string): number | null {
-  try {
-    const dir = projectsDirFor(workingDir, configDir)
-    if (!existsSync(dir)) return null
-    let newest: number | null = null
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith('.jsonl')) continue
-      const m = statSync(join(dir, f)).mtimeMs
-      if (newest === null || m > newest) newest = m
-    }
-    return newest
   } catch { return null }
 }

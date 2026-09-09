@@ -542,6 +542,19 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     }
   } catch (err) {
     logger.warn({ err, name, action: decision.action }, 'context-guard: action failed')
+    if (decision.action === 'restart') {
+      // A BUKOTT RESTART UTAN AZ ALLAPOT NEM MEHET ELORE. A `nextState` (await-ready)
+      // a 444. soron mar be van allitva, mire ide jutunk -- vagyis a gep azt hinne,
+      // hogy az agens ujraindult, es a kovetkezo sweep egy "folytasd a handoffbol"
+      // promptot injektalna UGYANABBA a telitett pane-be: a guard felelne meg a sajat
+      // helyreallitasat, es soha nem probalna ujra.
+      //
+      // Ez a modul sajat, mar leirt szabalya, ket sorral feljebb, a grace-agnal:
+      // ott `guardStates.set(name, state); return` all. Eddig azert nem sult el ezen
+      // az uton, mert a sub-agens restart HIBAJA nemaan elveszett (`ok:false` eldobva),
+      // tehat a dobas fel sem merult. Amint a bukas LATHATO lett, ez az ag is eloallt.
+      guardStates.set(name, state)
+    }
   }
 }
 
@@ -604,6 +617,25 @@ export function getHardGuardPhase(name: string): string {
   return guardStates.get(name)?.phase ?? 'idle'
 }
 
+/**
+ * EGY SOPRES, kivulrol inditva -- a huzalozas MERESEHEZ.
+ *
+ * MIERT KELL EXPORT. A guard dontese tesztelheto volt (tiszta fuggveny), a BEKOTESE nem:
+ * a `checkAgent` modul-privat, es csak egy `setInterval` hivta. Emiatt harom huzalozasi
+ * mutacio (a kiertekelo hivasanak torlese, a `ok:false` dobas torlese, a fuggo bejegyzes
+ * torlese) TULELT 4481 zold teszt mellett -- a boss merte ki, 2026-09-09. Egy or, ami jol
+ * dont es akit nem hivnak, kivulrol megkulonboztethetetlen attol, hogy nincs is or; ezen a
+ * kartyan pedig epp ez a targy, egy szinttel feljebb.
+ *
+ * A `nowMs` parameter szandekos: a fuggo ellenorzes turelmi ideje idofuggo, es valos ora
+ * mellett a teszt vagy hat percet varna, vagy a sajat sietseget merne.
+ */
+export async function guardSweepOnce(nowMs: number = Date.now()): Promise<void> {
+  for (const name of guardSweepAgentNames()) {
+    try { await checkAgent(name, nowMs) } catch (err) { logger.debug({ err, agent: name }, 'context-guard: agent check error') }
+  }
+}
+
 export function startContextGuardRunner(): NodeJS.Timeout {
   let tickRunning = false
   async function sweep() {
@@ -618,10 +650,9 @@ export function startContextGuardRunner(): NodeJS.Timeout {
     }
     tickRunning = true
     try {
-      const now = Date.now()
-      for (const name of guardSweepAgentNames()) {
-        try { await checkAgent(name, now) } catch (err) { logger.debug({ err, agent: name }, 'context-guard: agent check error') }
-      }
+      // UGYANAZ a fuggveny, amit a teszt hiv -- ket masolat eseten a huzalozas-teszt
+      // egy MASODIK utat merne, es az eles ut valtozatlanul meretlen maradna.
+      await guardSweepOnce(Date.now())
     } finally {
       tickRunning = false
     }
