@@ -671,3 +671,43 @@ function handoffRequest(
     },
   }
 }
+
+/**
+ * A RESTART EREDMENYENEK KIERTEKELESE -- tiszta fuggveny, I/O nelkul.
+ *
+ * MIERT ITT ALL, ES NEM A RUNNERBEN. Ez a modul a tiszta allapotgep, a runner csak
+ * az I/O -- es ez a dontes epp az, amit merni akarunk. A runnerben egy filesystem-
+ * es uzenetkuldes-fuggo fuggvenyben ulve a NEGY kimenet kozul csak azt lehetne
+ * tesztelni, amit a mock eppen megenged; itt mind a negy kimondhato.
+ *
+ * A DONTES ALAPJA A TRANSZKRIPT IDENTITASA, NEM A MTIME-JA. Egy hatastalan restart
+ * utan a REGI session fut tovabb, es az frissiti az mtime-ot -- tehat az idobelyeg
+ * a ket esetet NEM valasztja szet. A fajl NEVE (a session id) igen.
+ * (Merve 2026-09-07, safar: ket restart ugyanazon a napon, azonos kodut, azonos ket
+ * naplosor, kulonbozo kimenet.)
+ */
+export type RestartEredmeny = 'varunk' | 'nem-merheto' | 'uj-session' | 'hatastalan'
+
+export function ertekeldRestartEredmenyt(be: {
+  /** A restart ELOTT latott legfrissebb transzkript neve. `null`, ha akkor sem volt. */
+  elozoTranszkript: string | null
+  /** A MOST latott legfrissebb transzkript neve. `null`, ha nem olvashato. */
+  mostaniTranszkript: string | null
+  /** A restart ota eltelt ido (ms). */
+  eltelteMs: number
+  /** Ennyi ido utan varjuk el az uj transzkriptet. */
+  turelmiMs: number
+}): RestartEredmeny {
+  // A TURELMI IDO NEM OVATOSSAG, HANEM A MERES FELTETELE: egy friss session az
+  // ELSO forduloja utan ir eloszor. Elotte a "nincs uj fajl" a mi sietsegunket
+  // merne, nem a restartot -- vagyis MINDEN restart hatastalannak latszana.
+  if (be.eltelteMs < be.turelmiMs) return 'varunk'
+  // A "NEM TUDOM" KULON KIMENET. Ha osszevonnank a "hatastalan"-nal, egy olvashatatlan
+  // projekt-mappa (jogosultsag, athelyezett agens) VALODI riasztast szulne; ha a
+  // "uj-session"-nel, egy nema hiba latszana rendnek. Egyik sem igaz allitas.
+  if (be.mostaniTranszkript === null) return 'nem-merheto'
+  // AZ ELOZO HIANYA UJ SESSIONT JELENT, HA MOST VAN: nem volt transzkript, most van
+  // -- ez pontosan az, amit a restarttol vartunk.
+  if (be.elozoTranszkript === null) return 'uj-session'
+  return be.mostaniTranszkript === be.elozoTranszkript ? 'hatastalan' : 'uj-session'
+}

@@ -141,6 +141,40 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
  * the newest file; this exposes it rather than recomputing the selection
  * differently, so the two always describe the SAME transcript.
  */
+/**
+ * The NAME (session id) of the newest transcript for a working dir, or null.
+ *
+ * WHY THE NAME AND NOT THE MTIME. The mtime answers "when did this session
+ * last do anything"; this answers "WHICH session is it". Those are different
+ * questions, and the context guard needs the second one: a restart that leaves
+ * the OLD session running still refreshes the mtime, because the old session
+ * keeps working -- it is the file's IDENTITY that changes when a genuinely new
+ * session starts.
+ *
+ * Measured on 2026-09-07 (safar, two restarts on one day, same code path, same
+ * two log lines): the 19:42 restart produced a new transcript, the 12:38 one
+ * did not, and the old session went on to run the 19:00 newsletter job with a
+ * saturated context. The logs could not tell the two apart. This can.
+ *
+ * Selection mirrors readTranscriptMtimeFromProjectDir exactly (newest .jsonl by
+ * mtime) so the two helpers always describe the SAME file; a different tie-break
+ * here would make "the session changed" and "the session is idle" refer to
+ * different transcripts, which is worse than either being missing.
+ */
+export function readNewestTranscriptNameFromProjectDir(workingDir: string, configDir?: string): string | null {
+  try {
+    const dir = projectsDirFor(workingDir, configDir)
+    if (!existsSync(dir)) return null
+    let newest: { name: string; mtime: number } | null = null
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue
+      const m = statSync(join(dir, f)).mtimeMs
+      if (newest === null || m > newest.mtime) newest = { name: f, mtime: m }
+    }
+    return newest ? newest.name : null
+  } catch { return null }
+}
+
 export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?: string): number | null {
   try {
     const dir = projectsDirFor(workingDir, configDir)

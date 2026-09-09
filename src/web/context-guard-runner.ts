@@ -15,7 +15,7 @@ import {
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation } from '../pane-state.js'
-import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir } from './active-model.js'
+import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir, readNewestTranscriptNameFromProjectDir } from './active-model.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import { createAgentMessage } from '../db.js'
 import {
@@ -29,6 +29,7 @@ import {
   type GuardState,
   type HandoffStaleness,
   type GuardInputs,
+  ertekeldRestartEredmenyt,
 } from '../context-guard.js'
 
 // Fleet context guard (kanban #81): acts BEFORE a session drowns in its own
@@ -256,11 +257,96 @@ async function performRestart(name: string): Promise<void> {
     const res = hardRestartMarveenChannels()
     if (!res.ok) throw new Error(res.error ?? 'main channels hard restart failed')
   } else {
-    await restartAgentProcess(name, { fresh: true })
+    // A VISSZATERESI ERTEKET OLVASSUK. A `restartAgentProcess` NEM DOB egy
+    // sikertelen leallitasnal, hanem `{ ok: false, error }`-t ad vissza -- egy
+    // eldobott ertek mellett a guard sikerkent folytatna. A fo-agens aga ket
+    // sorral feljebb mar igy csinalja; ez a ket ag ugyanazt a kockazatot
+    // kezelte ketfelekeppen.
+    const res = await restartAgentProcess(name, { fresh: true })
+    if (!res.ok) throw new Error(res.error ?? `restart failed for ${name}`)
+  }
+}
+
+/**
+ * A BEAVATKOZAS EREDMENYENEK MERESE -- nem a tenye.
+ *
+ * A guard eddig a sajat restartjanak a TENYET naplozta (tmux stopped/started), az
+ * EREDMENYET nem. Egy HATASTALAN restart kivulrol beture ugyanugy nez ki, mint egy
+ * sikeres, es a kovetkezo sweep sem panaszkodik ujra, ha a mero allapota kozben nem
+ * valtozott. Merve 2026-09-07 (safar): ket restart, azonos ut, azonos ket naplosor,
+ * KULONBOZO kimenet -- a 12:38-as utan a regi session futott tovabb HET ORAT
+ * 100%-os kontextussal, es abban az allapotban kapta meg a 19:00-as munkat.
+ *
+ * A SZETVALASZTO JEL a transzkript-fajl IDENTITASA (safar merese, uzenet 5356):
+ * uj session -> uj `.jsonl` az agens sajat projekt-mappajaban. Az mtime NEM jo
+ * jel, mert a tovabbfuto REGI session is frissiti.
+ *
+ * MIERT A KOVETKEZO SWEEP-EN ELLENORIZZUK, ES NEM AZONNAL: egy friss session az
+ * elso forduloja utan ir eloszor. Egy azonnali ellenorzes tehat MINDIG "nincs uj
+ * fajl"-t adna -- vagyis a mero a sajat sietsegét merne, nem a restartot. A
+ * varakozas ezert nem ovatossag, hanem a meres feltetele.
+ */
+type FuggoEllenorzes = { elozoTranszkript: string | null; restartMs: number; ok: string }
+const fuggoRestartEllenorzesek = new Map<string, FuggoEllenorzes>()
+
+/** Ennyi ido utan mar VARJUK az uj transzkriptet. Egy teljes sweep (5 perc) + tartalek. */
+export const RESTART_EREDMENY_TURELMI_MS = 6 * 60_000
+
+/**
+ * A fuggo ellenorzes kiertekelese, ha eljott az ideje. Csak akkor szol, ha a
+ * transzkript-identitas NEM valtozott -- a hallgatas itt jelentes, nem hiany:
+ * a sikeres eset kulon `info` sort kap, hogy a ket allapot a naploban is elvaljon.
+ */
+function ellenorizdRestartEredmenyet(name: string, nowMs: number): void {
+  const f = fuggoRestartEllenorzesek.get(name)
+  if (!f) return
+  const most = readNewestTranscriptNameFromProjectDir(workingDirFor(name), configDirFor(name))
+  const eredmeny = ertekeldRestartEredmenyt({
+    elozoTranszkript: f.elozoTranszkript,
+    mostaniTranszkript: most,
+    eltelteMs: nowMs - f.restartMs,
+    turelmiMs: RESTART_EREDMENY_TURELMI_MS,
+  })
+  if (eredmeny === 'varunk') return
+  fuggoRestartEllenorzesek.delete(name)
+  if (eredmeny === 'nem-merheto') {
+    // A "NEM TUDOM" SEM CSEND: mas allitas, mint a "nem valtozott".
+    logger.warn(
+      { name, elozo: f.elozoTranszkript },
+      'context-guard: a restart eredmenye NEM MERHETO (nincs olvashato transzkript a projekt-mappaban)',
+    )
+    return
+  }
+  if (eredmeny === 'uj-session') {
+    logger.info({ name, ujTranszkript: most }, 'context-guard: a restart UJ sessiont inditott (eredmeny merve)')
+    return
+  }
+  logger.error(
+    { name, transzkript: most, ok: f.ok, eltelteMs: nowMs - f.restartMs },
+    'context-guard: A RESTART HATASTALAN VOLT -- ugyanaz a transzkript fut tovabb',
+  )
+  try {
+    createAgentMessage(
+      name,
+      MAIN_AGENT_ID,
+      `[CONTEXT-GUARD] A(z) "${name}" agens restartja HATASTALAN volt: ${Math.round((nowMs - f.restartMs) / 60_000)} perccel utana ` +
+      `UGYANAZ a transzkript fut tovabb (${most}). A restart oka: ${f.ok}. ` +
+      `A naploban a restart SIKERESNEK latszik (tmux stopped/started) -- ezert szol ez az uzenet: a beavatkozas TENYE megvolt, az EREDMENYE nem. ` +
+      `A session tehat valoszinuleg tovabbra is abban az allapotban van, ami a restartot kivaltotta.`,
+      'context-guard restart ineffective',
+    )
+  } catch (err) {
+    logger.warn({ err, name }, 'context-guard: hatastalan-restart ertesites kuldese nem sikerult')
   }
 }
 
 async function checkAgent(name: string, nowMs: number): Promise<void> {
+  // A KORABBI BEAVATKOZAS EREDMENYE ELOSZOR. Fuggetlen a mostani dontestol, es
+  // akkor is le kell futnia, ha a guard idokozben kikapcsolt vagy az agens
+  // remote lett -- egy hatastalan restart nem szunik meg attol, hogy mar nem
+  // figyeljuk.
+  ellenorizdRestartEredmenyet(name, nowMs)
+
   const cfg = readContextGuardConfig(name)
   const state = guardStates.get(name) ?? INITIAL_GUARD_STATE
 
@@ -409,7 +495,13 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
         } catch (err) {
           logger.warn({ err, name }, 'context-guard: pre-restart pane snapshot failed')
         }
+        // A RESTART ELOTTI transzkript-identitas -- ez lesz az osszehasonlitas alapja.
+        // ELOBB kell kiolvasni, mint a beavatkozast: utana mar nem tudjuk, mi volt.
+        const elozoTranszkript = readNewestTranscriptNameFromProjectDir(workingDirFor(name), configDirFor(name))
         await performRestart(name)
+        // A KOVETKEZO SWEEP-EK EGYIKE MERI MEG, HOGY HATOTT-E. Enelkul a guard a sajat
+        // beavatkozasanak csak a TENYET naplozna.
+        fuggoRestartEllenorzesek.set(name, { elozoTranszkript, restartMs: nowMs, ok: decision.reason })
         try {
           createAgentMessage(
             name,
