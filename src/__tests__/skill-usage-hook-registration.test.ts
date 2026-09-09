@@ -10,9 +10,9 @@ import { KNOWN_HOOK_SCRIPTS } from '../web/hook-registration-guard.js'
 // A hook that only exists on disk is dead code -- these tests pin the wiring,
 // not the (already unit-tested) capture logic.
 //
-// SCOPE -- what a green run here does and does not say, and where the rest lives.
-// Measured: what these tests assert (templates/settings.json.template), where the
-// running fleet's registration actually sits, and that the hook fires.
+// SCOPE -- these tests measure ONE thing: the template. Nothing else below is
+// measured here. The rest of this block names what a green run does NOT say,
+// and the two addresses where the answer about the running system lives.
 //   MEASURED HERE: templates/settings.json.template -- the starting config a
 //     SCAFFOLDED agent is created with. Asserting on the template is correct:
 //     the scaffold reads it, so this is the file that decides what a new agent
