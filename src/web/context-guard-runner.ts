@@ -1,5 +1,5 @@
-import { statSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { statSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { hardRestartMarveenChannels, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
@@ -287,7 +287,45 @@ async function performRestart(name: string): Promise<void> {
  * varakozas ezert nem ovatossag, hanem a meres feltetele.
  */
 type FuggoEllenorzes = { elozoTranszkript: string | null; restartMs: number; ok: string }
-const fuggoRestartEllenorzesek = new Map<string, FuggoEllenorzes>()
+
+/**
+ * A FUGGO ELLENORZESEK LEMEZEN ELNEK, NEM A MEMORIABAN -- es ez nem ovatossag.
+ *
+ * Egy memoriabeli terkep a dashboard ujraindulasakor NYOMTALANUL eltunik: a restart
+ * megtortent, a bejegyzes elveszett, es a hatastalansag SOHA nem derul ki. Az elso
+ * valtozat igy keszult, es a boss vette eszre a review-ban -- azzal az indokkal, hogy ez
+ * UGYANAZ a hibaosztaly, ami ellen az egesz kartya szol: a beavatkozas TENYE megvan, az
+ * EREDMENYE meretlen marad. Aznap reggel 08:09-kor a dashboard tenylegesen ujraindult.
+ *
+ * A `store/` ugyanaz a hely, ahol a highwater-terkep is el, es ugyanazzal a fail-soft
+ * olvasassal: egy serult vagy hianyzo fajl ures terkepet ad, nem dobast -- egy elveszett
+ * fuggo ellenorzes rossz, de a sweep megallitasa rosszabb.
+ */
+const FUGGO_PATH = join(PROJECT_ROOT, 'store', 'context-guard-restart-pending.json')
+
+function olvasdFuggoket(): Record<string, FuggoEllenorzes> {
+  try {
+    const parsed = JSON.parse(readFileSync(FUGGO_PATH, 'utf-8'))
+    return (parsed && typeof parsed === 'object') ? parsed as Record<string, FuggoEllenorzes> : {}
+  } catch { return {} }
+}
+
+function irdFuggoket(m: Record<string, FuggoEllenorzes>): void {
+  try {
+    mkdirSync(dirname(FUGGO_PATH), { recursive: true })
+    writeFileSync(FUGGO_PATH, JSON.stringify(m, null, 2))
+  } catch (err) {
+    // AZ IRAS BUKASA HANGOS. Csendben elnyelve a kovetkezo dashboard-restart utan ugyanoda
+    // jutnank, mint a memoriabeli valtozattal -- csak ugy, hogy kozben azt hisszuk, meg van oldva.
+    logger.warn({ err, path: FUGGO_PATH }, 'context-guard: a fuggo restart-ellenorzes mentese nem sikerult')
+  }
+}
+
+const fuggoRestartEllenorzesek = {
+  get(name: string): FuggoEllenorzes | undefined { return olvasdFuggoket()[name] },
+  set(name: string, e: FuggoEllenorzes): void { const m = olvasdFuggoket(); m[name] = e; irdFuggoket(m) },
+  delete(name: string): void { const m = olvasdFuggoket(); delete m[name]; irdFuggoket(m) },
+}
 
 /** Ennyi ido utan mar VARJUK az uj transzkriptet. Egy teljes sweep (5 perc) + tartalek. */
 export const RESTART_EREDMENY_TURELMI_MS = 6 * 60_000

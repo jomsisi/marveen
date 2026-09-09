@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -128,6 +128,21 @@ describe('a restart-eredmeny merese BE VAN KOTVE a sweepbe', () => {
 
     const uzenetek = createAgentMessage.mock.calls.map((c) => String(c[2] ?? ''))
     expect(uzenetek.some((u) => u.includes('HATASTALAN'))).toBe(false)
+  })
+
+  it('A FUGGO ELLENORZES LEMEZRE KERUL -- egy dashboard-restart nem nyeli el nyomtalanul', async () => {
+    // Az elso valtozat memoriabeli terkepet hasznalt, es a boss vette eszre: egy
+    // dashboard-ujrainditas (aznap reggel tortent egy) a bejegyzest nyomtalanul elvitte
+    // volna -- vagyis a hatastalansag SOHA nem derul ki. Ugyanaz a hibaosztaly, ami ellen
+    // ez az egesz kartya szol, egy szinttel feljebb.
+    const t0 = Date.now() + 40 * 60_000
+    transzkript('regi.jsonl', t0 - 60_000)
+    await restartotKivalt(t0)
+    const ut = join(SANDBOX, 'store', 'context-guard-restart-pending.json')
+    expect(existsSync(ut), 'a fuggo ellenorzes fajlja').toBe(true)
+    const m = JSON.parse(readFileSync(ut, 'utf-8'))
+    expect(Object.keys(m)).toContain(AGENS)
+    expect(m[AGENS].elozoTranszkript).toBe('regi.jsonl')
   })
 
   it('A TURELMI IDON BELUL MEG NEM SZOL -- a mero nem a sajat sietseget meri', async () => {
