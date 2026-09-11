@@ -66,7 +66,15 @@ s=sys.stdin.read()
 # listan. A kapu celja nem a "hasonlit-e" eldontese, hanem hogy a szo egy kesobbi grepre
 # ELOJON-E: ahhoz BARMELY cirill betu eleg egy egyebkent latin szoban.
 w=sorted({m for m in re.findall(r"\S*[\u0400-\u04FF]\S*", s)})
-print(" ".join(w[:6]))' 2>/dev/null)"
+# A SZO ES A KODPONT EGYUTT MEGY KI, es ez nem reszletesseg.
+# A szo megmondja, HOL keresd; a kodpont azt, MIT irj a magyarazatba. Ha csak a szot adjuk
+# vissza, a kapu ugyanabban a pillanatban a HIBAS ALAKOT teszi a kezedbe -- es a kovetkezo
+# lepes tipikusan az, hogy bemasolod a javitasrol szolo szovegbe. 2026-09-11: negy elofordulas
+# egy napon, ketto kozuluk EPP a jelensegrol szolo magyarazatban, mindketto masolassal.
+def jel(x):
+    kp = " ".join("U+%04X" % ord(c) for c in dict.fromkeys(c for c in x if "\u0400" <= c <= "\u04FF"))
+    return x + " [" + kp + "]"
+print(" ".join(jel(x) for x in w[:6]))' 2>/dev/null)"
 if [ -n "$HOMOGLYPHS" ]; then
   echo "WARN: cyrillic homoglyph(s) in the body -- sending anyway, but these will NOT be found by a" >&2
   echo "      later grep/search: $HOMOGLYPHS" >&2
