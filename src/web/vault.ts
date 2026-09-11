@@ -188,7 +188,38 @@ export function listSecrets(): Array<{ id: string, label: string, createdAt: str
   return readVault().entries.map(({ id, label, createdAt, updatedAt }) => ({ id, label, createdAt, updatedAt }))
 }
 
+// THE LABEL IS STORED IN CLEARTEXT, SO A SWAPPED ARGUMENT IS A LEAK, NOT A TYPO.
+// `setSecret(id, label, value)` takes three strings of the same type, so the compiler
+// cannot tell them apart, and `label` is the one field that never goes through
+// `encrypt()` -- `listSecrets()` hands it back raw. A `(id, value, description)` call
+// therefore writes the secret itself into the vault file in the clear, and answers "OK".
+// That happened on 2026-09-08 with a 64-character secret; what caught it was a sha256
+// comparison against the other store, not the call itself.
+//
+// WHERE THE THRESHOLD COMES FROM -- the existing vault, not a guess. Across its 37
+// entries the labels run 7 to 85 characters, 32 of the 37 contain a space, and the five
+// spaceless ones stop at 23 characters (`DEEPSEEK_API_KEY` in scripts/setup.ts is one of
+// them). The secret that leaked was 64 characters with no space. 32 sits between the
+// longest legitimate spaceless label and the shortest observed leak, with room on both
+// sides, so it is not tuned to a single case.
+const LABEL_MAX_SPACELESS = 32
+
+// Only the SHAPE is reported, never the text: a guard built to keep a secret out of a
+// cleartext file must not hand that same secret to a log line or an error channel.
+export function labelTitokAlaku(label: string): boolean {
+  return !label.includes(' ') && label.length >= LABEL_MAX_SPACELESS
+}
+
 export function setSecret(id: string, label: string, value: string): void {
+  if (labelTitokAlaku(label)) {
+    throw new Error(
+      `setSecret(${JSON.stringify(id)}): the label looks like a secret, not a description ` +
+      `(${label.length} characters, no space). Labels are stored UNENCRYPTED and listSecrets() ` +
+      'returns them raw, so this is most likely a swapped argument -- the signature is ' +
+      '(id, label, value). Pass a human description with spaces. The value is not shown here ' +
+      'on purpose.',
+    )
+  }
   const store = readVault()
   const now = new Date().toISOString()
   const idx = store.entries.findIndex(e => e.id === id)
