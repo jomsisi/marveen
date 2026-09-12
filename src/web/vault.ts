@@ -188,13 +188,17 @@ export function listSecrets(): Array<{ id: string, label: string, createdAt: str
   return readVault().entries.map(({ id, label, createdAt, updatedAt }) => ({ id, label, createdAt, updatedAt }))
 }
 
-// THE LABEL IS STORED IN CLEARTEXT, SO A SWAPPED ARGUMENT IS A LEAK, NOT A TYPO.
-// `setSecret(id, label, value)` takes three strings of the same type, so the compiler
-// cannot tell them apart, and `label` is the one field that never goes through
-// `encrypt()` -- `listSecrets()` hands it back raw. A `(id, value, description)` call
-// therefore writes the secret itself into the vault file in the clear, and answers "OK".
-// That happened on 2026-09-08 with a 64-character secret; what caught it was a sha256
-// comparison against the other store, not the call itself.
+// THE LABEL IS STORED IN CLEARTEXT, SO PUTTING A SECRET THERE IS A LEAK, NOT A TYPO.
+// `label` is the one field that never goes through `encrypt()` -- `listSecrets()` hands
+// it back raw -- so whatever lands in it sits in the vault file readable. On 2026-09-08 a
+// 64-character secret landed there; the call did not object, and what caught it was a
+// sha256 comparison against the other store.
+//
+// THE SIGNATURE THAT ALLOWED IT IS GONE: it took `(id, label, value)` as three positional
+// strings, so `(id, value, description)` compiled and ran. It now takes one named object
+// (see `SetSecretBe` below), which is why this guard no longer carries that argument on
+// its own. It stays because naming the fields makes a swap visible, not impossible: a
+// SHORT secret in the label slot still type-checks.
 //
 // WHERE THE THRESHOLD COMES FROM -- the existing vault, not a guess. Across its 37
 // entries the labels run 7 to 85 characters, 32 of the 37 contain a space, and the five
