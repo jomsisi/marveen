@@ -113,7 +113,7 @@ export function vaultAndBindEnvSecrets(
   for (const [key, value] of Object.entries(envSecrets)) {
     if (!value) continue
     const vaultId = `${slugifyMcp(serverName)}-${key.toLowerCase()}`
-    setSecret(vaultId, `${key} (${serverName})`, value)
+    setSecret({ id: vaultId, label: `${key} (${serverName})`, value })
     addBinding({ vaultSecretId: vaultId, envVar: key, targets: [{ mcpFilePath, serverName }] })
     const result = syncSecret(vaultId)
     if (result.errors.length) {
@@ -297,7 +297,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     if (env) {
       for (const [key, value] of Object.entries(env)) {
         const vaultId = `github-env-${key.toLowerCase()}-${Date.now()}`
-        setSecret(vaultId, `${key} (GitHub repo)`, value)
+        setSecret({ id: vaultId, label: `${key} (GitHub repo)`, value })
         envVarMapping[key] = vaultId
       }
     }
@@ -729,7 +729,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const { id, label, value } = JSON.parse(body.toString()) as { id: string, label: string, value: string }
     if (!id?.trim() || !value) { json(res, { error: 'id and value required' }, 400); return true }
-    setSecret(id.trim(), label || id.trim(), value)
+    setSecret({ id: id.trim(), label: label || id.trim(), value })
     const syncResult = syncSecret(id.trim())
     json(res, { ok: true, synced: syncResult.updated })
     return true
@@ -880,7 +880,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
         errors.push(`Could not read value for ${imp.envVar} from ${imp.serverName}`)
         continue
       }
-      setSecret(imp.vaultId, imp.label, value)
+      setSecret({ id: imp.vaultId, label: imp.label, value })
       imported++
       if (imp.createBinding && imp.targets.length > 0) {
         addBinding({ vaultSecretId: imp.vaultId, envVar: imp.envVar, targets: imp.targets })

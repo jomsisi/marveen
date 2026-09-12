@@ -210,13 +210,35 @@ export function labelTitokAlaku(label: string): boolean {
   return !label.includes(' ') && label.length >= LABEL_MAX_SPACELESS
 }
 
-export function setSecret(id: string, label: string, value: string): void {
+/**
+ * A secret and the sentence describing it are both strings, and for three positional
+ * parameters that is the whole problem: `(id, value, description)` compiles, runs, and
+ * reports success while writing the secret into the cleartext label. The shape guard
+ * below catches the case that was actually measured -- a long, spaceless value -- but a
+ * SHORT secret in the label slot passes it, and so does a swap between two short strings.
+ *
+ * Naming the fields does not make that impossible; it makes it VISIBLE. A caller now has
+ * to write `label:` in front of the thing it puts there, so a swap has to be typed out
+ * rather than fallen into, and it is legible in review without knowing the signature by
+ * heart. That is the whole claim, and it is deliberately smaller than "this cannot
+ * happen again".
+ */
+export interface SetSecretBe {
+  id: string
+  /** Human description, STORED IN CLEARTEXT. Never a secret -- see labelTitokAlaku. */
+  label: string
+  /** The secret itself. Encrypted at rest. */
+  value: string
+}
+
+export function setSecret({ id, label, value }: SetSecretBe): void {
   if (labelTitokAlaku(label)) {
     throw new Error(
       `setSecret(${JSON.stringify(id)}): the label looks like a secret, not a description ` +
       `(${label.length} characters, no space). Labels are stored UNENCRYPTED and listSecrets() ` +
-      'returns them raw, so this is most likely a swapped argument -- the signature is ' +
-      '(id, label, value). Pass a human description with spaces. The value is not shown here ' +
+      'returns them raw, so this is most likely the wrong field -- the signature is ' +
+      'setSecret({ id, label, value }). Pass a human description with spaces. The value is not ' +
+      'shown here ' +
       'on purpose.',
     )
   }

@@ -84,7 +84,7 @@ export async function tryHandleConnectorsHu(ctx: RouteContext): Promise<boolean>
         return true
       }
 
-      setSecret(VAULT_ID, VAULT_LABEL, token.trim())
+      setSecret({ id: VAULT_ID, label: VAULT_LABEL, value: token.trim() })
 
       const { installed } = await isInstalled()
       if (!installed) {

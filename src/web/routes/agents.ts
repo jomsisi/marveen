@@ -2109,7 +2109,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (data.authMode !== undefined) {
       writeAgentAuthMode(name, data.authMode)
       if (data.authMode === 'api' && typeof data.apiKey === 'string' && data.apiKey.trim()) {
-        setSecret(`agent-${name}-api-key`, `API key for agent ${name}`, data.apiKey.trim())
+        setSecret({ id: `agent-${name}-api-key`, label: `API key for agent ${name}`, value: data.apiKey.trim() })
       }
       if (data.authMode !== 'api') {
         deleteSecret(`agent-${name}-api-key`)

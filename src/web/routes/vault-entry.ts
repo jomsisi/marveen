@@ -149,12 +149,16 @@ export async function tryHandleVaultEntry(ctx: RouteContext): Promise<boolean> {
       sendHtml(res, page('<h1 class="err">A link már felhasználódott</h1>', 'Felhasználva'), 410)
       return true
     }
-    setSecret(entry.vaultId, entry.label, JSON.stringify({
-      url: loginUrl,
-      username,
-      password,
-      savedAt: new Date().toISOString(),
-    }))
+    setSecret({
+      id: entry.vaultId,
+      label: entry.label,
+      value: JSON.stringify({
+        url: loginUrl,
+        username,
+        password,
+        savedAt: new Date().toISOString(),
+      }),
+    })
     // NEVER log the value -- only that a write happened.
     logger.info({ vaultId: entry.vaultId, site: entry.siteHint }, 'vault-entry: credential saved')
     sendHtml(res, page('<h1 class="ok">Kész, mentve.</h1><p class="sub">A belépő biztonságosan a széfbe került. Ezt az ablakot bezárhatod.</p>', 'Mentve'))

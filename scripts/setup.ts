@@ -156,7 +156,7 @@ async function main() {
     // a kulcs igy a dashboard felulet rotacios kontrollja ala kerul es
     // nem jelenik meg a .env fajl tartalmaban hat hosszan.
     const { setSecret } = await import('../dist/web/vault.js')
-    setSecret('DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY', dsKey)
+    setSecret({ id: 'DEEPSEEK_API_KEY', label: 'DEEPSEEK_API_KEY', value: dsKey })
     ok('DeepSeek API kulcs mentve a vault-ba (DEEPSEEK_API_KEY)')
     ok('A deepseek-v4-pro modell most mar elerheto agensekhez')
   } else {

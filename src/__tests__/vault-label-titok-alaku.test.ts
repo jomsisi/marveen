@@ -36,7 +36,7 @@ describe('labelTitokAlaku', () => {
   })
 
   it('a real spaceless identifier that is in use today passes', () => {
-    // scripts/setup.ts:159 -- `setSecret('DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY', dsKey)`.
+    // scripts/setup.ts:159 -- `setSecret({ id: 'DEEPSEEK_API_KEY', label: 'DEEPSEEK_API_KEY', value: dsKey })`.
     // 17 characters, no space. A space-only rule would break the installer.
     expect(labelTitokAlaku('DEEPSEEK_API_KEY')).toBe(false)
     expect('DEEPSEEK_API_KEY'.length).toBeLessThan(32)
@@ -64,7 +64,7 @@ describe('labelTitokAlaku', () => {
 describe('setSecret refuses a secret-shaped label', () => {
   it('throws, and writes NOTHING to the vault', () => {
     const titok = 'b'.repeat(64)
-    expect(() => setSecret('proba-elutasitott', titok, 'a valodi ertek')).toThrowError(
+    expect(() => setSecret({ id: 'proba-elutasitott', label: titok, value: 'a valodi ertek' })).toThrowError(
       /looks like a secret, not a description/,
     )
     // FAIL-CLOSED, NOT FAIL-LOUD-THEN-WRITE: the entry must not exist afterwards.
@@ -74,10 +74,10 @@ describe('setSecret refuses a secret-shaped label', () => {
   it('the error names the rule, the id and the SHAPE -- and never the value', () => {
     const titok = 'c'.repeat(64)
     let uzenet = ''
-    try { setSecret('proba-uzenet', titok, 'SZIGORUAN-TITKOS-ERTEK-42') } catch (e) { uzenet = (e as Error).message }
+    try { setSecret({ id: 'proba-uzenet', label: titok, value: 'SZIGORUAN-TITKOS-ERTEK-42' }) } catch (e) { uzenet = (e as Error).message }
     expect(uzenet).toContain('proba-uzenet')      // which call site
     expect(uzenet).toContain('64 characters')      // the measured shape
-    expect(uzenet).toContain('(id, label, value)') // the rule
+    expect(uzenet).toContain('setSecret({ id, label, value })') // the rule, in its current shape
     // AND THE POINT OF THE WHOLE CHANGE: a guard that keeps a secret out of a cleartext
     // file must not read it out through the error channel instead.
     expect(uzenet).not.toContain('SZIGORUAN-TITKOS-ERTEK-42')
@@ -87,7 +87,7 @@ describe('setSecret refuses a secret-shaped label', () => {
   it('a legitimate description still gets written', () => {
     // POSITIVE CONTROL for the two cases above: without it, a `setSecret` that threw on
     // EVERYTHING would satisfy them both.
-    setSecret('proba-rendben', 'Evedd kapcsolati lista titok', 'ertek-42')
+    setSecret({ id: 'proba-rendben', label: 'Evedd kapcsolati lista titok', value: 'ertek-42' })
     expect(listSecrets().some((e) => e.id === 'proba-rendben')).toBe(true)
     expect(existsSync(join(tmpRoot, 'store', 'vault.json'))).toBe(true)
     // and the stored label is the description, not the value

@@ -181,7 +181,7 @@ export async function tryHandleVaultSsh(ctx: RouteContext): Promise<boolean> {
       const { privateKey, publicKey, fingerprint } = generateSshKeyPair(comment)
 
       const vaultKeyId = `ssh-key-${keyId}`
-      setSecret(vaultKeyId, `SSH private key: ${label}`, privateKey)
+      setSecret({ id: vaultKeyId, label: `SSH private key: ${label}`, value: privateKey })
 
       const { createVaultSshKey } = await import('../../db.js')
       createVaultSshKey({ id: keyId, label, username: keyUser, vault_key_id: vaultKeyId, public_key: publicKey, fingerprint, key_type: 'ed25519' })

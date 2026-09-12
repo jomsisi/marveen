@@ -68,7 +68,7 @@ async function seedVaultWithSecret(): Promise<string> {
   // way to create a REAL encrypted entry with a REAL key.
   keychainMock.available = false
   const v = await freshVault()
-  v.setSecret('probe', 'Probe secret', 'probe-value-42')
+  v.setSecret({ id: 'probe', label: 'Probe secret', value: 'probe-value-42' })
   const key = readFileSync(keyPath, 'utf-8').trim()
   expect(key.length).toBeGreaterThan(0)
   return key
@@ -108,7 +108,7 @@ describe('VAULTUJKULCS822: fail-closed master key handling', () => {
     keychainMock.available = true
     keychainMock.readResult = { status: 'empty', value: null }
     const v = await freshVault()
-    v.setSecret('first', 'First', 'v1')
+    v.setSecret({ id: 'first', label: 'First', value: 'v1' })
     expect(keychainMock.storeCalls).toHaveLength(1)
   })
 
@@ -176,7 +176,7 @@ describe('PR #1048 review: corrupt vault.json must not look like an empty vault'
     keychainMock.available = true
     keychainMock.readResult = { status: 'empty', value: null }
     const v = await freshVault()
-    expect(() => v.setSecret('x', 'X', 'v')).toThrowError(/cannot be read or parsed/)
+    expect(() => v.setSecret({ id: 'x', label: 'X', value: 'v' })).toThrowError(/cannot be read or parsed/)
     expect(keychainMock.storeCalls).toHaveLength(0)
   })
 
@@ -186,7 +186,7 @@ describe('PR #1048 review: corrupt vault.json must not look like an empty vault'
     writeFileSync(vaultPath, '###corrupt###', { mode: 0o600 })
     keychainMock.available = true
     const v = await freshVault()
-    expect(() => v.setSecret('x', 'X', 'v')).toThrowError(/cannot be read or parsed/)
+    expect(() => v.setSecret({ id: 'x', label: 'X', value: 'v' })).toThrowError(/cannot be read or parsed/)
     expect(keychainMock.storeCalls).toHaveLength(0)
     expect(readFileSync(migratedPath, 'utf-8').trim()).toBe(goodKey)
   })
@@ -195,7 +195,7 @@ describe('PR #1048 review: corrupt vault.json must not look like an empty vault'
     keychainMock.available = true
     keychainMock.readResult = { status: 'empty', value: null }
     const v = await freshVault()
-    v.setSecret('first', 'First', 'v1')
+    v.setSecret({ id: 'first', label: 'First', value: 'v1' })
     expect(keychainMock.storeCalls).toHaveLength(1)
   })
 })

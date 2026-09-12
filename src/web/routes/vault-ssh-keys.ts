@@ -91,7 +91,7 @@ export async function tryHandleVaultSshKeys(ctx: RouteContext): Promise<boolean>
       const { privateKey, publicKey, fingerprint } = generateSshKeyPair(comment)
 
       const vaultKeyId = `ssh-key-${id}`
-      setSecret(vaultKeyId, `SSH private key: ${label}`, privateKey)
+      setSecret({ id: vaultKeyId, label: `SSH private key: ${label}`, value: privateKey })
 
       const key = createVaultSshKey({ id, label, username, vault_key_id: vaultKeyId, public_key: publicKey, fingerprint, key_type: 'ed25519' })
       logger.info({ id, label, fingerprint }, 'SSH key created')
@@ -150,7 +150,7 @@ export async function tryHandleVaultSshKeys(ctx: RouteContext): Promise<boolean>
       const id = randomBytes(8).toString('hex')
       const vaultKeyId = `ssh-key-${id}`
 
-      setSecret(vaultKeyId, `SSH private key: ${label}`, privateKey)
+      setSecret({ id: vaultKeyId, label: `SSH private key: ${label}`, value: privateKey })
       const key = createVaultSshKey({ id, label, username, vault_key_id: vaultKeyId, public_key: publicKey, fingerprint, key_type: keyType })
       logger.info({ id, label, fingerprint, keyType }, 'SSH key imported')
       json(res, { key: toApiShape(key), publicKey }, 201)
