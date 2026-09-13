@@ -76,7 +76,17 @@ if [ "$TOPLEVEL" = "$PROD_ROOT" ] && [ "${MARVEEN_PROD_COMMIT_OK:-0}" != "1" ]; 
   echo "BLOCKED: commit on the running main checkout ($PROD_ROOT)." >&2
   echo "The dashboard serves static files from this tree and host updates pull into it." >&2
   echo "Work in a worktree instead:" >&2
-  echo "  git worktree add ../$(basename "$PROD_ROOT")-wt-<topic> -b <branch> origin/develop" >&2
+  echo "  git worktree add ../$(basename "$PROD_ROOT")-wt-<topic> -b <branch> origin/main" >&2
+  # THE BASE IS origin/main, AND THE OBVIOUS-LOOKING origin/develop IS THE TRAP (measured 2026-09-13).
+  # upstream's default branch IS develop (upstream/HEAD -> upstream/develop), so `develop` reads as
+  # the right answer here -- it was the value this line shipped with. It is not. Measured on the
+  # four branches, the .gitignore fail-closed block (`scripts/*.py` ignored by default, product
+  # files enabled by a visible negating line) exists on EXACTLY ONE:
+  #     upstream/develop 0 | upstream/main 0 | origin/develop 0 | origin/main 1
+  # The block is ours, fork-local, and it never travelled upstream. A worktree based off develop
+  # therefore has scripts/*.py UNIGNORED -- on a PUBLIC repo, that is the one protection this
+  # project added on purpose. Our fork's develop is also inert: 0 commits of ours, 247 behind
+  # upstream/develop. Before changing this back, re-run the four-branch count.
   echo "Deliberate override: MARVEEN_PROD_COMMIT_OK=1 git commit ..." >&2
   exit 1
 fi
