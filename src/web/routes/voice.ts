@@ -22,7 +22,7 @@ import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { KNOWN_VOICE_MODELS, AGENTS_BASE_DIR, readAgentVoiceConfig } from '../agent-config.js'
 import { getLastInboundModality, setLastInboundModality } from '../voice-modality.js'
-import { buildTtsDirective, resolveAgentChannelStateDir, inboundIsAudio } from '../voice-directive.js'
+import { buildTtsDirective, resolveAgentChannelStateDir, inboundIsAudio, shouldSpeakInAuto } from '../voice-directive.js'
 import { PROJECT_ROOT } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -135,10 +135,15 @@ export async function tryHandleVoice(ctx: RouteContext): Promise<boolean> {
     // Audio is decided by the declared attachment kind, never by the mere
     // presence of a file id -- a document attachment is not a voice message.
     const inboundWasAudio = fileIdOk && inboundIsAudio(kindParam, fileParam)
+    // `auto` must not decide from the envelope alone: message-router's
+    // server-side STT strips attachment_kind/attachment_file_id when it injects
+    // the transcript, so by the time the hook calls us the audio marker is gone.
+    // The router records the modality before that rewrite; read it back.
+    const speakInAuto = shouldSpeakInAuto(inboundWasAudio, getLastInboundModality(agentId, chatId))
     const ttsParams = { chatId, stateDir, voiceModel: voiceCfg.voiceModel ?? 'hu_HU-imre-medium' }
     const directive = voiceCfg.responseMode === 'text' ? null
       : voiceCfg.responseMode === 'voice' ? buildTtsDirective(ttsParams)
-      : inboundWasAudio ? buildTtsDirective(ttsParams)  // auto: only when inbound was audio
+      : speakInAuto ? buildTtsDirective(ttsParams)  // auto: inbound audio, or a recorded voice turn
       : null
 
     let transcript: string | null = null
