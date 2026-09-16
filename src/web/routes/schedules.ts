@@ -126,14 +126,21 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       throw err
     }
     const data = JSON.parse(body.toString()) as {
-      name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string
+      name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number
     }
     const name = sanitizeScheduleName(data.name || '')
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
-    if (!data.prompt?.trim()) { json(res, { error: 'Prompt is required' }, 400); return true }
-    if (data.prompt.length > MAX_SCHEDULED_TASK_PROMPT_LEN) {
+    // A `command` tipusnak nincs SKILL.md-je: nyers shell megy `bash -lc`-vel, prompt nelkul
+    // (scheduled-tasks-io.ts:43-48). A promptot tehat nem kerjuk szamon rajta -- helyette a
+    // `command` a kotelezo mezo, kulonben a feladat letrejon es NEM CSINAL SEMMIT.
+    if (data.type === 'command') {
+      if (!data.command?.trim()) { json(res, { error: 'Command is required for type=command' }, 400); return true }
+    } else if (!data.prompt?.trim()) {
+      json(res, { error: 'Prompt is required' }, 400); return true
+    }
+    if ((data.prompt?.length ?? 0) > MAX_SCHEDULED_TASK_PROMPT_LEN) {
       json(res, {
-        error: `Prompt too large (${data.prompt.length} chars, max ${MAX_SCHEDULED_TASK_PROMPT_LEN})`,
+        error: `Prompt too large (${data.prompt!.length} chars, max ${MAX_SCHEDULED_TASK_PROMPT_LEN})`,
       }, 413)
       return true
     }
@@ -145,7 +152,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
     writeScheduledTask(name, {
       description: data.description || '',
-      prompt: data.prompt.trim(),
+      prompt: data.prompt?.trim() ?? '',
       schedule: data.schedule.trim(),
       agent: data.agent || MAIN_AGENT_ID,
       enabled: true,
@@ -153,6 +160,9 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       skipIfBusy: data.skipIfBusy === true,
       forceSend: data.forceSend === true,
       targetSession: data.targetSession || undefined,
+      command: data.command,
+      timeoutMs: data.timeoutMs,
+      failThreshold: data.failThreshold,
     })
     logger.info({ name, schedule: data.schedule }, 'Scheduled task created')
     json(res, { ok: true, name })
@@ -177,7 +187,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       throw err
     }
     const data = JSON.parse(body.toString()) as {
-      description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string
+      description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number
     }
     if (data.prompt !== undefined && data.prompt.length > MAX_SCHEDULED_TASK_PROMPT_LEN) {
       json(res, {
