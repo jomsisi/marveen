@@ -74,6 +74,10 @@ KEZBESITES_TIMEOUT = int(os.environ.get('DRAIN_KEZBESITES_TIMEOUT', '70'))
 KEZBESITO = os.environ.get('DRAIN_KEZBESITO',
                            f'bash {GYOKER}/scripts/agent-msg.sh')
 MAX_PROBA = int(os.environ.get('DRAIN_MAX_PROBA', '3'))
+# Az idotullepes NEM bukas: a helper varhat a FOGLALT cel-sessionre, mikozben az uzenet mar
+# letrejott. A bizonyitek a TAROLO, nem a helper valasza -- ezert a burok visszaolvassa.
+# (Felulirhato, hogy a javitas proba-adatbazison is merheto legyen.)
+DB = os.environ.get('DRAIN_DB', os.path.join(GYOKER, 'store', 'claudeclaw.db'))
 
 
 def log(*a):
@@ -105,6 +109,43 @@ def ment(sorok):
     os.replace(tmp, FUGGO)
 
 
+def kezbesites_igazolas(blokk, tol):
+    """Idotullepes utan: LETREJOTT-E megis az uzenet? A tarolo dont, nem a helper valasza.
+
+    MIERT (2026-09-18, Zsolt jovahagyasa; harom masodpeldany egy MAR MEGVALASZOLT kerdesre):
+    az `agent-msg.sh` a FOGLALT cel-sessionre VAR, es a burok 70 masodperces korlatja elobb
+    jar le, mint ahogy az `OK id=` megjonne. Mind a harom kezbesites MEGTORTENT (6288, 6289,
+    6290), es a burok mindharmat bukasnak konyvelte -- vagyis egy MAR MEGVALASZOLT kerdes
+    ment fel ujra es ujra. **A drain akkor tuzel, amikor van mit felhozni, vagyis amikor a
+    session DOLGOZIK: a nyugta epp abban az allapotban olvashatatlan, amiben a mechanizmus a
+    leggyakrabban fut.**
+
+    A blokk elso sora (`OPEN_QUESTION chat_id=... message_id=...`) eleg megkulonbozteto
+    kulcsnak; a teljes szoveget azert NEM hasonlitjuk, mert a kezbesitett uzenet a bevezetot
+    is tartalmazza.
+    """
+    kulcs = blokk.split('\n')[0].strip()
+    if not kulcs:
+        return None
+    try:
+        import sqlite3
+        db = sqlite3.connect(f'file:{DB}?mode=ro', uri=True, timeout=5)
+        try:
+            sor = db.execute(
+                "SELECT id FROM agent_messages WHERE from_agent='boss' AND to_agent='boss' "
+                "AND created_at >= ? AND instr(content, ?) > 0 ORDER BY id DESC LIMIT 1",
+                (tol, kulcs)).fetchone()
+        finally:
+            db.close()
+        return str(sor[0]) if sor else None
+    except Exception as e:
+        # FAIL-OPEN A REGI VISELKEDES FELE: ha a visszaolvasas maga bukik, a tetel fuggoben
+        # marad es a kovetkezo kor ujraprobalja -- ugyanaz, mint a javitas elott. Egy nema
+        # "kezbesitve" itt rosszabb volna, mint egy felesleges ujraproba.
+        log(f'IGAZOLAS NEM FUTOTT LE ({e.__class__.__name__}: {e}) -- a tetel fuggoben marad')
+        return None
+
+
 def kezbesit(blokk):
     """Inter-agent uzenet SAJAT MAGAMNAK: a router beteszi a session inputjaba,
     tehat ugyanugy elem meg, mintha a heartbeat hozta volna fel -- csak CSAK AKKOR,
@@ -120,16 +161,21 @@ def kezbesit(blokk):
         'mintha eppen most erkezett volna.\n\n'
         + blokk
     )
+    indult = int(time.time()) - 5   # 5 mp csuszas-tures az ora- es iras-kesesre
     try:
         p = subprocess.run(KEZBESITO.split() + ['boss', 'boss', '-'],
                            input=uzenet.encode('utf-8'),
                            capture_output=True, cwd=GYOKER,
                            timeout=KEZBESITES_TIMEOUT)
     except subprocess.TimeoutExpired:
-        # FONTOS: ez NEM jelenti azt, hogy a kuldes nem ment at. A helper mar
-        # elkuldhette, csak a nyugtat nem lattuk. Ezert a hivo a `probak` szamlalot
-        # MAR a hivas elott lemezre irta, es MAX_PROBA utan felad.
-        return None, f'IDOTULLEPES {KEZBESITES_TIMEOUT}s -- a kuldes MEGTORTENHETETT'
+        # A kuldes ATMEHETETT -- ezt 2026-09-18 ota NEM feltetelezzuk, hanem MEGMERJUK.
+        # A `probak` szamlalo tovabbra is a hivas ELOTT kerul lemezre, tehat ha a visszaolvasas
+        # sem fut le, a regi viselkedes all vissza (fuggoben marad, MAX_PROBA utan felad).
+        mid = kezbesites_igazolas(blokk, indult)
+        if mid:
+            return mid, (f'IDOTULLEPES {KEZBESITES_TIMEOUT}s, DE A TAROLO SZERINT KIMENT '
+                         f'(uzenet {mid}) -- a nyugtat nem lattuk, a kezbesitest igen')
+        return None, f'IDOTULLEPES {KEZBESITES_TIMEOUT}s -- a taroloban sincs nyoma'
     ki = (p.stdout or b'').decode() + (p.stderr or b'').decode()
     m = re.search(r'OK id=(\d+)', ki)
     return (m.group(1) if m else None), ki.strip()[:200]
