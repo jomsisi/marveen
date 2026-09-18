@@ -260,10 +260,6 @@ def main():
     belyeg('kezbesites-folyamatban')
     maradt, kuldott, feladva = [], 0, 0
     for i, tetel in enumerate(fuggo):
-        if tetel.get('feladva'):
-            maradt.append(tetel)
-            feladva += 1
-            continue
         # ELOSZOR AZT KERDEZD MEG, HOGY AZ ELOZO PROBA NEM MENT-E AT (2026-09-18, negy
         # masodpeldany egy MAR MEGVALASZOLT kerdesre). A timeout utani azonnali visszaolvasas
         # ELES KORBEN HAROMSZOR IS NULLAT ADOTT: a sorok `created_at`-je (6291, 6292, 6293)
@@ -281,6 +277,10 @@ def main():
                 ment(maradt + fuggo[i + 1:])
                 continue
 
+        if tetel.get('feladva'):
+            maradt.append(tetel)
+            feladva += 1
+            continue
         if tetel.get('probak', 0) >= MAX_PROBA:
             tetel['feladva'] = True
             maradt.append(tetel)
