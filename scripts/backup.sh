@@ -66,6 +66,26 @@ add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-shm
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-wal
 add_if "${REPOLIST}" "${REPO_ROOT}" store/.dashboard-token
 add_if "${REPOLIST}" "${REPO_ROOT}" store/config-overrides.json
+# Potolhatatlan, NEM ujraeloallithato store-tartalom (2026-09-08, Zsolt jovahagyasa,
+# Telegram 3434). SZANDEKOSAN csak EBBE a csomagba kerul: a hirlevel-lista SZEMELYES
+# ADAT, a munkaadat-mentes pedig felhobe (OneDrive) megy es titok-mentesnek kell
+# maradnia. A mi-club-export KIMARAD: 370 MB, es a MI Clubbol barmikor ujraletoltheto.
+add_if "${REPOLIST}" "${REPO_ROOT}" store/hirlevel-lista
+add_if "${REPOLIST}" "${REPO_ROOT}" store/reports
+# EGY FUTO AUTOMATIZMUS EGYETLEN PELDANYA (safar merte ki 2026-09-16, boss visszamerte).
+# Ezek a fajlok a `.gitignore` `scripts/*.sh|mjs` es `store/` szabalyai ala esnek, tehat NINCS
+# verziokovetesuk, es eddig egyik mentes sem vitte oket. A `webmail-erkezettek.mjs`-t HAROM
+# utemezett feladat hivja (sajat-postafiok-valasz-figyeles, evedd-ugyeleti-jelentes,
+# trafik-jelentes-postafiok-figyeles) -- ha elveszik, mindharom NEMAN elhal.
+add_if "${REPOLIST}" "${REPO_ROOT}" scripts/trafik-postafiok-figyeles.sh
+add_if "${REPOLIST}" "${REPO_ROOT}" scripts/browser
+# A `mennyiseg-meres` konyvtarbol CSAK A SZKRIPT megy, a nyers bolti adat NEM: az ~10 MB naponta,
+# ujraeloallithato a boltbol, es ugyanaz a titok-kerdes all ra, amit a `store/*.csv`-nel mar
+# felvetettunk. A szkript viszont potolhatatlan (pl. az `ar-elteres-boltok-kozott.cjs` hordozza
+# a nem-GTIN kizarasi szabalyt).
+if [[ -d "${REPO_ROOT}/store/mennyiseg-meres" ]]; then
+  ( cd "${REPO_ROOT}" && find store/mennyiseg-meres -type f \( -name '*.py' -o -name '*.cjs' \) -print ) >> "${REPOLIST}"
+fi
 add_if "${REPOLIST}" "${REPO_ROOT}" .env
 add_if "${REPOLIST}" "${REPO_ROOT}" scheduled-tasks.json
 add_if "${REPOLIST}" "${REPO_ROOT}" assets/meetings
@@ -77,9 +97,35 @@ if [[ -d agents ]]; then
     -print >> "${REPOLIST}"
 fi
 
+# Per-agent memory pages. Same reason as the shared store below, and they need their
+# own line because they live in the REPO, not under $HOME -- and `.gitignore` covers
+# them, so git is not a second copy either. Five dirs, one page each today.
+if [[ -d agents ]]; then
+  find agents -mindepth 2 -maxdepth 2 -type d -name 'memory' -print >> "${REPOLIST}"
+fi
+
 # home/ group (relative to $HOME)
 add_if "${HOMELIST}" "${HOME}" .claude/skills
 add_if "${HOMELIST}" "${HOME}" .claude/scheduled-tasks
+# The file-backed memory store (2026-09-18, Zsolt's approval on Telegram 3733;
+# safar measured the gap on 09-17). These pages are what actually loads into every
+# session, so they are the layer that changes behaviour -- and until today they had
+# NO copy anywhere: neither this archive nor the OneDrive one matched
+# `projects/*/memory/`, and the SQLite mirror is a side effect, not a backup (it
+# reformats frontmatter as prose, is line-resolution, and drops one page that trips
+# the dashboard's injection filter).
+#
+# INTENTIONALLY LOCAL-ONLY: 12 pages contain e-mail addresses, so the store is
+# personal data -- the same classification that keeps `store/hirlevel-lista` out of
+# the cloud package (see the comment above it). `backup-munkaadat.sh` copies only
+# skills/ and scheduled-tasks/ from $HOME, so it stays out of the cloud by
+# construction; do not widen it there.
+#
+# GLOB, NOT A HARDCODED PATH: a new agent's project dir would otherwise be left out
+# silently, with nothing to signal it.
+if [[ -d "${HOME}/.claude/projects" ]]; then
+  ( cd "${HOME}" && find .claude/projects -mindepth 2 -maxdepth 2 -type d -name 'memory' -print ) >> "${HOMELIST}"
+fi
 # MAIN orchestrator channel tokens + pairing state, per provider. bot.pid and
 # inbox/ are runtime/transient and intentionally excluded.
 if [[ -d "${HOME}/.claude/channels" ]]; then
