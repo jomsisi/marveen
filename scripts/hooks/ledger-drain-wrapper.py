@@ -264,6 +264,23 @@ def main():
             maradt.append(tetel)
             feladva += 1
             continue
+        # ELOSZOR AZT KERDEZD MEG, HOGY AZ ELOZO PROBA NEM MENT-E AT (2026-09-18, negy
+        # masodpeldany egy MAR MEGVALASZOLT kerdesre). A timeout utani azonnali visszaolvasas
+        # ELES KORBEN HAROMSZOR IS NULLAT ADOTT: a sorok `created_at`-je (6291, 6292, 6293)
+        # masodpercre egyezett azzal a pillanattal, amikor a burok mar feladta. Egy turelmi
+        # ido ezt csak szukiti, nem zarja be -- a KOVETKEZO kor viszont ket perccel kesobb
+        # jon, es akkor a sor BIZTOSAN ott van. Ezert a dontes nem a kuldes UTAN szuletik,
+        # hanem ELOTTE: ha mar van sor az elso tarolas ota, a tetel UJRAKULDES NELKUL kerul ki.
+        if tetel.get('probak', 0) > 0:
+            mid = kezbesites_igazolas(tetel['blokk'], tetel['elso'] - 5)
+            if mid:
+                kuldott += 1
+                log(f'MAR KIKEZBESITVE (uzenet {mid}), a nyugtat csak nem lattuk: '
+                    f'{tetel["blokk"].split(chr(10))[0]} | {tetel["probak"]}. proba utan, '
+                    'UJRAKULDES NELKUL kiveve')
+                ment(maradt + fuggo[i + 1:])
+                continue
+
         if tetel.get('probak', 0) >= MAX_PROBA:
             tetel['feladva'] = True
             maradt.append(tetel)
