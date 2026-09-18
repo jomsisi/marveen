@@ -171,7 +171,17 @@ def kezbesit(blokk):
         # A kuldes ATMEHETETT -- ezt 2026-09-18 ota NEM feltetelezzuk, hanem MEGMERJUK.
         # A `probak` szamlalo tovabbra is a hivas ELOTT kerul lemezre, tehat ha a visszaolvasas
         # sem fut le, a regi viselkedes all vissza (fuggoben marad, MAX_PROBA utan felad).
-        mid = kezbesites_igazolas(blokk, indult)
+        # A SOR A TIMEOUT PILLANATABAN KELETKEZIK, NEM ELOTTE (kimerve 2026-09-18 08:09:14 --
+        # az elso eles kor a javitas utan). A 6291-es uzenet `created_at`-je MASODPERCRE
+        # egyezett azzal a pillanattal, amikor a burok visszaolvasott, es igy a sajat esetere
+        # "nincs nyoma"-t adott. Ezert az igazolas TURELMI IDOVEL es TOBBSZOR fut.
+        mid = None
+        for varakozas in (0, 2, 3):
+            if varakozas:
+                time.sleep(varakozas)
+            mid = kezbesites_igazolas(blokk, indult)
+            if mid:
+                break
         if mid:
             return mid, (f'IDOTULLEPES {KEZBESITES_TIMEOUT}s, DE A TAROLO SZERINT KIMENT '
                          f'(uzenet {mid}) -- a nyugtat nem lattuk, a kezbesitest igen')
