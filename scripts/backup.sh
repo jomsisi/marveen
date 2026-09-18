@@ -10,15 +10,36 @@
 #     .env                     (project root secrets)
 #     scheduled-tasks.json     (legacy, if present)
 #     assets/meetings/**       (meeting transcripts/memos)
+#     store/hirlevel-lista, store/reports          (personal data: LOCAL package only)
+#     scripts/browser/**, scripts/trafik-postafiok-figyeles.sh
+#     store/mennyiseg-meres/*.py|cjs               (the scripts, not the raw store data)
+#     agents/*/memory/**                           (per-agent memory pages)
 #     agents/*/CLAUDE.md, SOUL.md, .mcp.json
 #     agents/*/.claude/channels/{telegram,slack,discord}/.env, access.json
 #
 #   home/   -> extract under $HOME
 #     .claude/skills/**            (the self-built skill library)
 #     .claude/scheduled-tasks/**   (file-based scheduled tasks: SKILL.md + config)
+#     .claude/projects/*/memory/** (the file-backed memory store; LOCAL package only)
 #     .claude/channels/*/.env      (MAIN orchestrator channel token)
 #     .claude/channels/*/access.json, invites.json, approved/**  (pairing state)
 #     Library/LaunchAgents/com.<MAIN_AGENT_ID>.*.plist (launchd jobs)
+#
+# KNOWN GAP, measured 2026-09-18, left here on purpose so the next reader inherits the
+# question and not just the answer: the lines above name PLACES, and a place is narrower
+# than the idea behind it. `agents/*/CLAUDE.md, SOUL.md` covers every sub-agent's identity
+# file and misses the main agent's, because the root CLAUDE.md and SOUL.md do not live
+# under agents/. Same shape across the tree: 58 gitignored, untracked files are in no
+# archive, 45 of them under scripts/ -- including the homoglyph gate the whole fleet runs
+# and the backup scripts themselves. They are gitignored on purpose (this repo is public),
+# so git is not a second copy for them either.
+# Deliberately NOT proposed for inclusion: `.env.bak.*` and `*.bak-*`. Those are stale
+# copies, and the .env ones carry secrets the live .env already covers -- widening a backup
+# to "everything that is missing" is the same list-thinking in the other direction. The
+# scope is two filters, not one: what would have to be rebuilt, AND what must not leak.
+# If the scope is widened, rewrite these lines as CONCEPTS, or the next widening will copy
+# the place again -- and code agreeing with a comment is two copies of one assumption, not
+# a confirmation.
 #
 # Output: backups/claudeclaw-YYYYmmdd-HHMMSS.tar.gz
 # Retention: keeps the most recent 14 archives, prunes the rest.
