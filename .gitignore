@@ -304,3 +304,8 @@ transcripts/
 # el). A .example vaz viszont kimegy: abbol kap a vevo sajat kontextus-sablont.
 .agents/*
 !.agents/product-marketing.md.example
+
+# tailscale cert a CWD-be ir (a vault-credential-entry-link skill ellenorzo lepese).
+# A .key VALODI privat kulcs, es ennek a repnak PUBLIKUS forkja van.
+*.ts.net.crt
+*.ts.net.key
