@@ -259,6 +259,7 @@ scripts/*.sh
 !scripts/notify.sh
 !scripts/pre-modify-backup.sh
 !scripts/pre-pr-review.sh
+!scripts/projektdir-or.sh
 !scripts/set-bot-menu.sh
 !scripts/skill-index.sh
 !scripts/smoke-test-slack-channel.sh
