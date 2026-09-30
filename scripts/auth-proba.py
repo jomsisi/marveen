@@ -4,8 +4,38 @@
 A kizaras kulcsa KIZAROLAG a registry `kivetel` objektuma. Az `ismert` listat SOHA nem olvassuk:
 az az ELO agens-fakat sorolja fel, es azt kizarni pont a merest oltana ki.
 """
-import json, sys, re, os, glob
+import json, sys, re, os, glob, atexit, datetime, io
 from collections import Counter
+
+# FUTAS-BELYEG -- MERT A NEM FUTO PROBA UGYANUGY NEZ KI, MINT A TISZTA (2026-09-30, a boss
+# `ledger-live-drain` esete nyoman: ott ket hetig egyetlen sor sem keletkezett, es ez nem dontesbol
+# kovetkezett, hanem abbol, hogy senki nem merte meg). Eddig a hajnali orjarat EGYETLEN nyoma a napi
+# naplo volt -- azt viszont AZ AGENS irja, ugyanaz, akinek a kimaradasat ki akarjuk szurni. Ha a
+# jarat nem tuzel, a nyom a jelenseggel EGYUTT tunik el. A belyeg ezert azt irja, amit a MUVELET
+# tud: futott-e, hanyadszor, es MILYEN allapottal allt le.
+# A `kod` a "legutolso allapot FAJTAJA" jel: 0=tiszta, 1=a mero vak, 2=elo talalat.
+# atexit: a ket korai `sys.exit(1)` es egy nem kezelt kivetel utan is lefut -- kulonben a belyegnek
+# maganak lenne soha-nem-futo aga, egy szinttel lejjebb ugyanaz a hiba.
+_TESZT   = os.environ.get('MICHEL_BELYEG_TESZT') == '1'
+_BELYEG  = ('/root/marveen/marveen/marveen/marveen/store/michel-orjarat-belyeg-auth'
+            + ('.teszt' if _TESZT else '') + '.txt')
+_allapot = {'kod': 'megszakadt', 'jel': 'a szkript a belyeg-iras elott allt le'}
+
+def _belyeg_ir():
+    try:
+        futas = 1
+        try:
+            for tok in io.open(_BELYEG, encoding='utf-8').read().split():
+                if tok.startswith('futas='):
+                    futas = int(tok.split('=', 1)[1]) + 1
+        except Exception:
+            pass            # nincs meg belyeg: ez az elso futas
+        io.open(_BELYEG, 'w', encoding='utf-8').write(
+            f"proba=auth-proba  ido={datetime.datetime.now().isoformat(timespec='seconds')}"
+            f"  futas={futas}  kod={_allapot['kod']}  jel={_allapot['jel']}\n")
+    except Exception:
+        pass                # a belyeg SOHA ne bukjon el a proba HELYETT
+atexit.register(_belyeg_ir)
 
 AUTH = re.compile(r'401|oauth|auth|login|unauthor|token has expired', re.I)
 cfg  = json.load(open(sys.argv[1] if len(sys.argv) > 1
@@ -38,6 +68,7 @@ files = glob.glob(os.path.join(ROOT, '**', '*.jsonl'), recursive=True)
 elo_files = [x for x in files if projekt(x) not in KIZART]
 if not files:
     print(f"  fajl: 0   *** A MERO NEM LAT ({ROOT}) -- a nulla NEM allitas ***")
+    _allapot.update(kod=1, jel=f'A_MERO_NEM_LAT:fajl=0:gyoker={ROOT}')
     sys.exit(1)
 # ES a feltetel a KIZARAS UTAN maradora is all (a boss msg 8270). Ha a fajl-szam pozitiv, de ELO
 # fa egy sem marad, az (a)/(b)/(c) ugyanugy nulla -- csak most a KIZARAS oltja ki a merest, nem a
@@ -46,6 +77,7 @@ if not files:
 if not elo_files:
     print(f"  fajl: {len(files)}, de ELO fa egy sem   *** MINDEN FA KIZARVA -- a nulla NEM allitas ***")
     print(f"      kizart: {sorted(KIZART)}")
+    _allapot.update(kod=1, jel=f'MINDEN_FA_KIZARVA:fajl={len(files)}')
     sys.exit(1)
 for f in files:
     kiz = projekt(f) in KIZART
@@ -100,4 +132,7 @@ print("  fajtak (elo fa):")
 for s, n in fajta.most_common(6):
     print(f"      {n:5d}  {s}")
 # A (d) NEM bukik el: csak all. Kilepesi kod kizarolag az ELO fa auth-talalatara.
+_allapot.update(kod=2 if elo_auth else 0,
+                jel=f'a={len(elo_auth)}:b={elo_total}:d={kiz_total}:fajl={len(files)}'
+                    f':uj_alak={len(uj_alak)}')
 sys.exit(2 if elo_auth else 0)
