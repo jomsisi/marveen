@@ -11,6 +11,7 @@ AUTH = re.compile(r'401|oauth|auth|login|unauthor|token has expired', re.I)
 cfg  = json.load(open(sys.argv[1] if len(sys.argv) > 1
                       else '/root/marveen/marveen/marveen/marveen/store/projektdir-or.json'))
 ROOT = cfg['projects_gyoker']
+ISMERT_ALAK = set(cfg.get('ismert_alakok', []))   # NEM szuro: az ismeretlen alakot JELEZZUK
 KIZART = set(cfg['kivetel'].keys())          # <- kizaro kulcs KIZAROLAG a `kivetel`.
 # Az `ismert` listat CSAK itt olvassuk, es NEM kizarasra, hanem a kizaras TILTASARA:
 # a valodi hiba az, ha egy ELO fa kerul a `kivetel`-be -- az csendben elnyelne az elo talalatot.
@@ -22,6 +23,7 @@ def projekt(path):
     rel = os.path.relpath(path, ROOT)
     return rel.split(os.sep)[0]
 
+uj_alak = []
 elo_total = kiz_total = 0
 elo_auth, kiz_auth = [], []
 elo_ts,  kiz_ts    = [], []
@@ -69,6 +71,8 @@ for f in files:
             if ts: elo_ts.append(ts)
             fajta[t.strip()[:52]] += 1
             if AUTH.search(t): elo_auth.append((ts, projekt(f), t[:70]))
+            if ISMERT_ALAK and t.strip() not in ISMERT_ALAK:
+                uj_alak.append((ts, projekt(f), t.strip()))
 
 elo_ts.sort(); kiz_ts.sort()
 print(f"  fajl: {len(files)}   kizart projekt: {sorted(KIZART) if KIZART else '-'}")
@@ -83,6 +87,15 @@ if elo_auth:
     print("  *** ELO FABAN AUTH-TALALAT ***")
     for ts, p, t in elo_auth:
         print(f"      {ts}  [{p}]  {t}")
+# UJ ALAK: nem az auth-SZOT keressuk, hanem az ISMERETLEN alakot jelezzuk (boss msg 8277).
+# Indok: egy szo-lista pont azon a szoveg-valtozaton bukik, amire keszult -- a `session HAS
+# expired` meg a bovitett listat is elkerulte. Az alak-lista viszont nem zajos: 558 soron
+# HAT kulonbozo teljes szoveg all, hetek alatt. Az auth-minta igy KENYELEM, nem kapu.
+# NEM valtoztat kilepesi kodot: kiirja, es ranezunk. (Harmadik exit-kod ket forrast csinalna.)
+if uj_alak:
+    print(f"  *** ISMERETLEN ALAK: {len(uj_alak)} -- nezz ra, es ha rendben, vedd fel az `ismert_alakok` koze ***")
+    for ts, p, t in uj_alak[:5]:
+        print(f"      {ts}  [{p}]  {t[:110]}")
 print("  fajtak (elo fa):")
 for s, n in fajta.most_common(6):
     print(f"      {n:5d}  {s}")
