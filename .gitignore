@@ -184,6 +184,7 @@ scripts/browser/
 # hogy a git lassa oket, hanem hogy a szandek irasban alljon es a `git check-ignore` ne
 # hazudjon rola.
 scripts/*.py
+!scripts/auth-proba.py
 !scripts/boot-hook-prune.py
 !scripts/gdocs.py
 !scripts/intel_db.py
