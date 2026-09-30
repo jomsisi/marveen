@@ -188,6 +188,7 @@ scripts/*.py
 !scripts/boot-hook-prune.py
 !scripts/gdocs.py
 !scripts/intel_db.py
+!scripts/laura-bejovo-kontroll.py
 !scripts/memory-link-audit.py
 !scripts/usage-collect.py
 !scripts/watchdog-inbound-prober.py
