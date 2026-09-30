@@ -33,8 +33,17 @@ files = glob.glob(os.path.join(ROOT, '**', '*.jsonl'), recursive=True)
 # 2026-09-30: nem letezo `projects_gyoker` -> exit 0, ures kimenet, megkulonboztethetetlen a
 # valodi tiszta esestol. A banner-sor kikotese ezt NEM fedi: az azt mondja meg, hogy a szkript
 # LEFUTOTT-e, nem azt, hogy LATOTT-e valamit.
+elo_files = [x for x in files if projekt(x) not in KIZART]
 if not files:
     print(f"  fajl: 0   *** A MERO NEM LAT ({ROOT}) -- a nulla NEM allitas ***")
+    sys.exit(1)
+# ES a feltetel a KIZARAS UTAN maradora is all (a boss msg 8270). Ha a fajl-szam pozitiv, de ELO
+# fa egy sem marad, az (a)/(b)/(c) ugyanugy nulla -- csak most a KIZARAS oltja ki a merest, nem a
+# rossz gyoker. Az assert erre vak, ha a kizart projekt nincs az `ismert`-ben. Ma az elerhetoseg
+# nulla (mind a 8 projekt az `ismert` vagy a `kivetel` halmazban van), de a CLASS igy zar be.
+if not elo_files:
+    print(f"  fajl: {len(files)}, de ELO fa egy sem   *** MINDEN FA KIZARVA -- a nulla NEM allitas ***")
+    print(f"      kizart: {sorted(KIZART)}")
     sys.exit(1)
 for f in files:
     kiz = projekt(f) in KIZART
