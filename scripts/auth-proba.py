@@ -28,6 +28,14 @@ elo_ts,  kiz_ts    = [], []
 fajta = Counter()
 
 files = glob.glob(os.path.join(ROOT, '**', '*.jsonl'), recursive=True)
+# POZITIV KONTROLL: ha NULLA fajlt latunk, nem a fa tiszta, hanem a MERO vak (rossz gyoker,
+# jogosultsag, elmozdult fa). Enelkul a szkript exit 0-val "tisztat" jelentene -- merve
+# 2026-09-30: nem letezo `projects_gyoker` -> exit 0, ures kimenet, megkulonboztethetetlen a
+# valodi tiszta esestol. A banner-sor kikotese ezt NEM fedi: az azt mondja meg, hogy a szkript
+# LEFUTOTT-e, nem azt, hogy LATOTT-e valamit.
+if not files:
+    print(f"  fajl: 0   *** A MERO NEM LAT ({ROOT}) -- a nulla NEM allitas ***")
+    sys.exit(1)
 for f in files:
     kiz = projekt(f) in KIZART
     for l in open(f, encoding='utf-8', errors='replace'):
