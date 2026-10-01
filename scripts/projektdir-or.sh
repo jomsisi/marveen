@@ -79,7 +79,14 @@ echo "--- FORDITOTT AG (elo peldany projekt-konyvtar nelkul):"
 talalt=0
 for p in /proc/[0-9]*; do
   pid=${p#/proc/}; [ -r "$p/cmdline" ] || continue
-  case "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)" in */claude|*/claude\ *) ;; *) continue;; esac
+  # AZ ILLESZTES HELYE DONT, NEM A MINTA FINOMSAGA. A TELJES cmdline-ra illesztve a tmux INDITO is
+  # bejon, mert az ARGUMENTUMAI tartalmazzak a claude-hivast -- es az inditonak NINCS
+  # CLAUDE_CONFIG_DIR-je (merve: /proc/7528/environ -> 0 sor), tehat az alabbi diszkriminator az
+  # (a) agra viszi: HANGOS HAMIS ESEMENY, rc=2. argv[0]-ra illesztve az egesz osztaly megszunik.
+  # (michel merte ki 2026-10-01 a sajat szuroján; itt KONTROLLAL visszamerve ugyanaznap: egy
+  #  /usr/bin/tail folyamat, aminek a cmdline-ja a claude utjara vegzodik, "(a) ESEMENY"-t adott.)
+  a0=$(tr '\0' '\n' < "$p/cmdline" 2>/dev/null | head -1)
+  case "$a0" in */claude|claude) ;; *) continue;; esac
   cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
   slug=$(printf '%s' "$cwd" | sed 's#[/.]#-#g')      # a PONT is kotojelre valt, nem csak a `/`
   [ -d "$P/$slug" ] && continue
