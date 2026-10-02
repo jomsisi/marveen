@@ -16,7 +16,30 @@ from collections import Counter
 # A `kod` a "legutolso allapot FAJTAJA" jel: 0=tiszta, 1=a mero vak, 2=elo talalat.
 # atexit: a ket korai `sys.exit(1)` es egy nem kezelt kivetel utan is lefut -- kulonben a belyegnek
 # maganak lenne soha-nem-futo aga, egy szinttel lejjebb ugyanaz a hiba.
-_TESZT   = os.environ.get('MICHEL_BELYEG_TESZT') == '1'
+# A TESZT-FELISMERES KET TAGU, ES NEM EGY OPCIONALIS KAPCSOLON ALL (2026-10-02).
+# ELOZMENY: a kapcsolo (`MICHEL_BELYEG_TESZT=1`) VEDELEMKENT volt szanva, es ket nap alatt KETSZER
+# elfelejtettem. A masodik eset megmutatta, hogy a kar nem a futas-szam inflacio: egy NEGATIV
+# KONTROLL futasom (egy MASOLAT registryvel, amibol kivettem egy ismert alakot) a VALODI belyegbe
+# irt `uj_alak=13`-at. A belyeg ettol tovabbra is hitelesen nezett ki -- friss idopont, `kod=0` --,
+# csak nem a vilagrol allitott. **A futas-szam inflacioja LATHATO, a TARTALOM elszennyezese nem.**
+# A KRITERIUM NEM AZ ARGUMENTUM LETE, HANEM AZ ATADOTT REGISTRY AZONOSSAGA (a boss msg 8517):
+# az "argumentum van -> teszt" szabaly az ELO registryt explicit atado futasra is teszt-belyeget
+# adna, es a scheduler argumentumos hivasanal az elo belyeg MEGALLNA (hangos irany, de felesleges).
+# A MASODIK TAG a szkript-masolatra szol: a mutacio-teszteket a SZKRIPT mutalt masolatan, ELO
+# registryvel futtatom, es arra a registry-tengely VAK.
+# AMIT EZ NEM FOG MEG (kimondva, hogy ne varjunk tole tobbet): elo szkript + elo registry + ALTALAM
+# PERTURBALT bemeneti fa (pl. egy szandekosan inditott folyamat a /proc-ban). Az ilyen belyeg NEM
+# hamis -- igaz allitas egy olyan vilagrol, amit en mozdítottam el --, tehat a kar kisebb; arra a
+# kapcsolo marad, mostantol FELULIRASKENT, nem vedelemkent.
+_ELO_REGISTRY = '/root/marveen/marveen/marveen/marveen/store/projektdir-or.json'
+_ELO_SZKRIPT  = '/root/marveen/marveen/marveen/marveen/scripts/auth-proba.py'
+_CFG_UT  = sys.argv[1] if len(sys.argv) > 1 else _ELO_REGISTRY
+_MAS_REG = os.path.realpath(_CFG_UT)  != os.path.realpath(_ELO_REGISTRY)
+_MAS_SZK = os.path.realpath(__file__) != os.path.realpath(_ELO_SZKRIPT)
+_TESZT   = (_MAS_REG or _MAS_SZK
+            or os.environ.get('MICHEL_BELYEG_TESZT') == '1')
+# A belyeg-ut ABSZOLUT literal: a hajnali jarat abszolut uttal hivja a szkriptet, tehat a
+# munkakonyvtar NEM az, ahol a `store/` all -- relativ utra epiteni itt nemán elhibazott lenne.
 _BELYEG  = ('/root/marveen/marveen/marveen/marveen/store/michel-orjarat-belyeg-auth'
             + ('.teszt' if _TESZT else '') + '.txt')
 _allapot = {'kod': 'megszakadt', 'jel': 'a szkript a belyeg-iras elott allt le'}
@@ -32,14 +55,15 @@ def _belyeg_ir():
             pass            # nincs meg belyeg: ez az elso futas
         io.open(_BELYEG, 'w', encoding='utf-8').write(
             f"proba=auth-proba  ido={datetime.datetime.now().isoformat(timespec='seconds')}"
-            f"  futas={futas}  kod={_allapot['kod']}  jel={_allapot['jel']}\n")
+            f"  futas={futas}  kod={_allapot['kod']}  jel={_allapot['jel']}"
+            + (f"  teszt_ok={'reg' if _MAS_REG else ''}{'szkript' if _MAS_SZK else ''}"
+               f"{'env' if not (_MAS_REG or _MAS_SZK) else ''}" if _TESZT else "") + "\n")
     except Exception:
         pass                # a belyeg SOHA ne bukjon el a proba HELYETT
 atexit.register(_belyeg_ir)
 
 AUTH = re.compile(r'401|oauth|auth|login|unauthor|token has expired', re.I)
-cfg  = json.load(open(sys.argv[1] if len(sys.argv) > 1
-                      else '/root/marveen/marveen/marveen/marveen/store/projektdir-or.json'))
+cfg  = json.load(open(_CFG_UT))   # ugyanaz az ut, amibol a teszt-felismeres is dontott
 ROOT = cfg['projects_gyoker']
 ISMERT_ALAK = set(cfg.get('ismert_alakok', []))   # NEM szuro: az ismeretlen alakot JELEZZUK
 KIZART = set(cfg['kivetel'].keys())          # <- kizaro kulcs KIZAROLAG a `kivetel`.

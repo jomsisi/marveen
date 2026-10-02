@@ -27,14 +27,32 @@ GYOKER="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # vak agon. Minden mezo MERT ertekbol jon; ahol nincs meres, `?` all, nem 0.
 belyeg_ir() {
   local k="$1" b f=1
-  b="$GYOKER/store/michel-orjarat-belyeg-projektdir"
-  [ "${MICHEL_BELYEG_TESZT:-}" = "1" ] && b="$b.teszt"
+  # A TESZT-FELISMERES KET TAGU (2026-10-02, a boss msg 8517 es a sajat ket napos hibam nyoman):
+  # a kapcsolo VEDELEMKENT ket nap alatt ketszer nem futott le, es a masodik eset megmutatta, hogy
+  # a kar nem a futas-szam, hanem a TARTALOM: egy masolat-registryvel futo kontroll az ELO belyegbe
+  # irt szintetikus erteket, friss idoponttal es `kod=0`-val, tehat hitelesen.
+  # A kriterium az ATADOTT REGISTRY AZONOSSAGA (nem az argumentum LETE: az elo registryt explicit
+  # atado futas, es a scheduler argumentumos hivasa is teszt-belyeget kapna), VAGY a SZKRIPT
+  # azonossaga (a mutacio-teszteket a szkript masolatan, ELO registryvel futtatom).
+  # NEM FOGJA MEG: elo szkript + elo registry + ALTALAM perturbalt bemenet (pl. egy szandekosan
+  # inditott folyamat a /proc-ban). Az ilyen belyeg nem hamis, csak nem reprezentativ -- arra a
+  # kapcsolo marad, FELULIRASKENT.
+  local elo_reg="/root/marveen/marveen/marveen/marveen/store/projektdir-or.json"
+  local elo_szk="/root/marveen/marveen/marveen/marveen/scripts/projektdir-or.sh"
+  local mas_reg=0 mas_szk=0 ok=""
+  [ "$(readlink -f "$CFG")" != "$(readlink -f "$elo_reg")" ] && { mas_reg=1; ok="reg"; }
+  [ "$(readlink -f "${BASH_SOURCE[0]}")" != "$(readlink -f "$elo_szk")" ] && { mas_szk=1; ok="${ok}szkript"; }
+  b="/root/marveen/marveen/marveen/marveen/store/michel-orjarat-belyeg-projektdir"
+  if [ "$mas_reg" = 1 ] || [ "$mas_szk" = 1 ]; then b="$b.teszt"
+  elif [ "${MICHEL_BELYEG_TESZT:-}" = "1" ]; then b="$b.teszt"; ok="env"
+  fi
   b="$b.txt"
   if [ -r "$b" ]; then
     f=$(sed -n 's/.*futas=\([0-9]*\).*/\1/p' "$b"); f=$(( ${f:-0} + 1 ))
   fi
-  printf 'proba=projektdir-or  ido=%s  futas=%s  kod=%s  jel=dir=%s:varatlan=%s:fordit_talalat=%s\n' \
-    "$(date -Iseconds)" "$f" "$k" "${osszes:-?}" "${varatlan:-?}" "${talalt:-?}" > "$b" 2>/dev/null || true
+  printf 'proba=projektdir-or  ido=%s  futas=%s  kod=%s  jel=dir=%s:varatlan=%s:fordit_talalat=%s%s\n' \
+    "$(date -Iseconds)" "$f" "$k" "${osszes:-?}" "${varatlan:-?}" "${talalt:-?}" \
+    "${ok:+  teszt_ok=$ok}" > "$b" 2>/dev/null || true
 }
 trap 'belyeg_ir "${rc:-1}"' EXIT
 CFG="${1:-$GYOKER/store/projektdir-or.json}"
