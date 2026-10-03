@@ -67,7 +67,25 @@ while d.isoformat() not in nap:
     nullas += 1
     d -= datetime.timedelta(days=1)
 
+# A KORPUSZNAK GORDULO ALSO HATARA VAN, TEHAT A CSOKKENES AZ ALAPESET (2026-10-03).
+# A `korpusz` hash megmondja, hogy a halmaz MAS -- azt nem, hogy a kulonbseg a RETENTION miatt all
+# elo. A Claude Code beepitett `cleanupPeriodDays` defaultja 30 nap (egyetlen settings-fajlban sem
+# allitjuk at), es a top-level session-transzkriptek legregebbije pontosan ma-30 napnal all. Tehat
+# minden reggel kieshet a legregebbi nap, es a darabszam LEFELE mozdul anelkul, hogy barmi elromlott
+# volna. 2026-10-03: 145 -> 133, az also hatar 402 -> 445, mert egy 09-02-i transzkript kiesett.
+# EZERT A SZAM MELLE A HORIZONT IS KIKERUL: igy a `KONTROLL: N db` onmagaban megmondja, MELYIK
+# ABLAKRA ervenyes. Ugyanaz a lecke, mint a hajnali orjarat (c) szamanal: egy szam, ami nem arulja
+# el, melyik halmazon mertek, a megnyugtato iranyba teved. (A boss kerese, agent_messages 8650.)
+# ES EGY NUANSZ, AMI NELKUL A SZAM ELLENTMONDASNAK LATSZIK: a horizont a TARTALOM also hatara, a
+# retention viszont a FAJL mtime-jara megy. Egy tobb napon at elo session fajlja minden irassal
+# frissul, tehat a benne allo LEGREGEBBI uzenet lehet a 30 napos ablakon TUL is. Merve 2026-10-03:
+# a horizont 09-02 (31 napja), mert az `ad3ec66d` fajl utolso irasa 09-13 -- a fajl friss, a
+# tartalma nem. Vagyis a "31 napja" nem cafolja a 30 napos retentiont, ket kulonbozo datumrol van szo.
+horizont = min(tal.values())          # a LEGREGEBBI meg LATHATO uzenet idobelyege
 print(f"KONTROLL: {len(ids)} db, {ids[0]} .. {ids[-1]}")
+print(f"HORIZONT: a legregebbi lathato uzenet {helyi(horizont)[:10]} "
+      f"({(datetime.date.today() - datetime.date(*map(int, helyi(horizont)[:10].split('-')))).days} napja)"
+      f"  -- a korpusz also hatara GORDUL (retention 30 nap), tehat a csokkenes alapeset")
 print(f"MA ({datetime.date.today()}): {len(ma)} bejovo" + (f"  {ma}" if ma else ""))
 print(f"NULLA-NAP egymas utan: {nullas}")
 print(f"utolso bejovo: {ids[-1]}  {helyi(tal[ids[-1]])}")
