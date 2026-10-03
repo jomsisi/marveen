@@ -86,6 +86,17 @@ while d.isoformat() not in nap:
 # egy idopontban mert ertek, es egy dokumentumba beirt alapertek ugyanolyan meroeszkoz, mint egy
 # szkript, csak nincs kilepesi kodja -- amikor elavul, nem hibazik, hanem hiteles alaku elterest
 # termel. A MECHANIZMUS a durable resz, a szam nem.
+#
+# ES HA A KET MEZO EGYSZERRE MOZDUL (a boss kerese, agent_messages 8655): a sorban NEVEZD MEG,
+# melyik valtozas MELYIK hatast magyarazza. Ket egyidejű IGAZ valtozas egymas alibije lesz --
+# "a minta is mas, a korpusz is mas, tehat a darabszam-elteres meg van magyarazva" --, es egy
+# HARMADIK, valodi ok (uj uzenet, eltunt uzenet) elfer kozottuk anelkul, hogy barmelyik mezo
+# jelezne. A helyes alak tagonkent rendeli hozza a hatast:
+#     mero_verzio mas  -> ennyi es ennyi id-t erint, mert a minta/szures valtozott
+#     korpusz mas      -> ennyi es ennyi id-t erint, mert ez a fajl kiesett/bejott
+#     a maradek         -> EZ a valodi esemeny, es csak ez
+# Elso eles elofordulas: 2026-10-04, amikor ket commit (minta) es a gordulo also hatar (korpusz)
+# egyszerre valt igazza.
 # EZERT A SZAM MELLE A HORIZONT IS KIKERUL: igy a `KONTROLL: N db` onmagaban megmondja, MELYIK
 # ABLAKRA ervenyes. Ugyanaz a lecke, mint a hajnali orjarat (c) szamanal: egy szam, ami nem arulja
 # el, melyik halmazon mertek, a megnyugtato iranyba teved. (A boss kerese, agent_messages 8650.)
