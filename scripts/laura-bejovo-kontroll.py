@@ -73,6 +73,19 @@ while d.isoformat() not in nap:
 # allitjuk at), es a top-level session-transzkriptek legregebbije pontosan ma-30 napnal all. Tehat
 # minden reggel kieshet a legregebbi nap, es a darabszam LEFELE mozdul anelkul, hogy barmi elromlott
 # volna. 2026-10-03: 145 -> 133, az also hatar 402 -> 445, mert egy 09-02-i transzkript kiesett.
+# DE A KET TENGELY MASKEPP MOZOG, es a sajat elso megfogalmazasom ("a korpusz also hatara GORDUL")
+# a FAJL-tengelyt irta le, nem azt, amit ez a szam mer (a boss javitasa, agent_messages 8652):
+#   FAJL-hatar ......... sima RAMPA, naponta egy nap, elore szamolhato
+#   TARTALOM-horizont .. LEPCSO. Amig egy hosszu eletu session EL, O tartja a horizontot, es az
+#                        relativ ertelemben minden nap REGEBB lesz (31, 32, 33 napja). Amikor az a
+#                        session kiesik, a horizont EGYSZERRE ugrik elore, akar hetekkel -- es az
+#                        ugras MERETE a legregebbi elo session eletkoratol fugg, nem a retentiontol.
+# Tehat a napi noveked NORMALIS, az ESEMENY majd az ugras lesz. A boss a teljes fan megmerte: a
+# tartalom-horizont ott 44 nap volt (egy 93 MB-os, MA IS irodo session tartja), a fajl-hatar 29 --
+# majdnem felszer szelesebb. **A 44-es szamot SZANDEKOSAN NEM irom be a kodba:** egy masik fabol,
+# egy idopontban mert ertek, es egy dokumentumba beirt alapertek ugyanolyan meroeszkoz, mint egy
+# szkript, csak nincs kilepesi kodja -- amikor elavul, nem hibazik, hanem hiteles alaku elterest
+# termel. A MECHANIZMUS a durable resz, a szam nem.
 # EZERT A SZAM MELLE A HORIZONT IS KIKERUL: igy a `KONTROLL: N db` onmagaban megmondja, MELYIK
 # ABLAKRA ervenyes. Ugyanaz a lecke, mint a hajnali orjarat (c) szamanal: egy szam, ami nem arulja
 # el, melyik halmazon mertek, a megnyugtato iranyba teved. (A boss kerese, agent_messages 8650.)
@@ -83,9 +96,11 @@ while d.isoformat() not in nap:
 # tartalma nem. Vagyis a "31 napja" nem cafolja a 30 napos retentiont, ket kulonbozo datumrol van szo.
 horizont = min(tal.values())          # a LEGREGEBBI meg LATHATO uzenet idobelyege
 print(f"KONTROLL: {len(ids)} db, {ids[0]} .. {ids[-1]}")
-print(f"HORIZONT: a legregebbi lathato uzenet {helyi(horizont)[:10]} "
-      f"({(datetime.date.today() - datetime.date(*map(int, helyi(horizont)[:10].split('-')))).days} napja)"
-      f"  -- a korpusz also hatara GORDUL (retention 30 nap), tehat a csokkenes alapeset")
+_hnap = (datetime.date.today() - datetime.date(*map(int, helyi(horizont)[:10].split('-')))).days
+print(f"HORIZONT: a legregebbi lathato uzenet {helyi(horizont)[:10]} ({_hnap} napja)")
+print("          A hatart a leghosszabb eletu TULELO session tartja, nem a retention datuma: ALL,")
+print("          majd UGRIK, amikor az a session kiesik. A retention a FAJL mtime-jara ervenyes, ez")
+print("          a szam a TARTALOMRA -- ket kulonbozo idotengely, nem ellentmondas.")
 print(f"MA ({datetime.date.today()}): {len(ma)} bejovo" + (f"  {ma}" if ma else ""))
 print(f"NULLA-NAP egymas utan: {nullas}")
 print(f"utolso bejovo: {ids[-1]}  {helyi(tal[ids[-1]])}")
