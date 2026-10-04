@@ -116,3 +116,70 @@ print(f"MA ({datetime.date.today()}): {len(ma)} bejovo" + (f"  {ma}" if ma else 
 print(f"NULLA-NAP egymas utan: {nullas}")
 print(f"utolso bejovo: {ids[-1]}  {helyi(tal[ids[-1]])}")
 print(f"mero_verzio={mero}  korpusz={korpusz}  fajl={len(fajlok)} ({' '.join(fajlok)})")
+
+# ===== ROGZITETT-PELDANY-EGYEZES (2026-10-04, a boss kikotesevel: agent_messages 8852) =====
+# MIERT: ma a `mero_verzio` ugy mozdult, hogy a kimenet harom szama BETURE valtozatlan maradt
+# (133 db, 445 .. 829). A tegnapi ertek (942014577c6d) a fajl NEGY commitolt valtozata kozul
+# egyikkel sem egyezett, a mai (3dc67457a2e7) a HEAD-en tarolt tartalom md5-je. Vagyis a tegnapi
+# kor egy NEM COMMITOLT munkafa-allapoton futott, es azt egy repo-muvelet 08:31 es 08:34 kozott
+# eltuntette. A SKILL harom agra bontja a kovetkezo elterest (mas minta / mas korpusz / valodi uj
+# uzenet); ez egy NEGYEDIK ag, es a legcsendesebb, mert epp a SZAM nem mozdul tole.
+#
+# AMIT EZ A MEZO TUD, ES AMIT NEM -- a boss kikotese, es a mezo szovege is ezt mondja ki:
+#   NEM attribual, hanem KIZAR egy agat.
+#   EGYEZIK, es a hash megis mozdult  -> a HAROM EREDETI ag egyike, nem a negyedik
+#   ELTER                             -> a mero nem rogzitett peldany, a negyedik ag NYITOTT
+#
+# ES A HORGONY FAJLONKENT MAS, EZERT A MEZO MEGNEVEZI, MELYIKHEZ MERT. A boss postafiok-koreben a
+# mero (`scripts/browser/webmail-erkezettek.mjs`) SZANDEKOSAN gitignore-olt (valodi email-cimek,
+# fail-closed dontes), tehat NINCS HEAD-valtozat, amihez merni lehetne -- nala a horgony a napi
+# mentes. Ezert nem "HEAD-egyezes" a mezo neve:
+#   git-horgony ....... 1 commit felbontas, de csak KOVETETT fajlra
+#   mentes-horgony .... 24 ora felbontas, viszont gitignore-olt fajlra is mukodik
+# A ket horgony nem helyettesiti egymast: a durvabb felbontas annyit allit, hogy a fajl a hajnali
+# mentesben rogzitett allapot -- egy aznapi, mentes utani modositast NEM lat.
+_REPO = '/root/marveen/marveen/marveen/marveen'
+
+def _rogzitett_peldany(ut, sajat_md5):
+    """(allapot, horgony) -- 'EGYEZIK' / 'ELTER' / 'MERETLEN', es a horgony megnevezese."""
+    import subprocess, tarfile
+    val = os.path.realpath(ut)
+    # A MERO LEHET A REPON KIVUL (teszt-masolat, /tmp): ilyenkor a `relpath` `../..`-alakot ad, es
+    # MINDKET horgony-kereses felreertheto hibaval bukna. Ezt ki kell mondani, nem tunet-szinten.
+    if os.path.commonpath([val, _REPO]) != _REPO:
+        return 'MERETLEN', f'a mero nem a repo faban all: {val}'
+    rel = os.path.relpath(val, _REPO)
+    def _git(*a):
+        return subprocess.run(('git', '-C', _REPO) + a, capture_output=True, timeout=20)
+    # 1. git-horgony, ha a fajl kovetett
+    try:
+        if _git('ls-files', '--error-unmatch', '--', rel).returncode == 0:
+            blob = _git('show', f'HEAD:{rel}')
+            sha  = _git('rev-parse', '--short', 'HEAD').stdout.decode().strip()
+            if blob.returncode == 0:
+                egy = hashlib.md5(blob.stdout).hexdigest()[:12] == sajat_md5
+                return ('EGYEZIK' if egy else 'ELTER'), f'HEAD {sha} (felbontas: 1 commit)'
+    except Exception as e:
+        return 'MERETLEN', f'git-horgony hiba: {type(e).__name__}'
+    # 2. mentes-horgony a nem kovetett (pl. gitignore-olt) fajlra
+    try:
+        m = sorted(glob.glob(os.path.join(_REPO, 'backups', 'claudeclaw-*.tar.gz')))
+        if not m:
+            return 'MERETLEN', 'nincs se git-horgony, se mentes'
+        with tarfile.open(m[-1]) as t:
+            try:
+                f = t.extractfile(f'repo/{rel}')
+            except KeyError:
+                return 'MERETLEN', f'a mentesben nincs benne: repo/{rel}'
+            if f is None:
+                return 'MERETLEN', f'a mentesben nem sima fajl: repo/{rel}'
+            egy = hashlib.md5(f.read()).hexdigest()[:12] == sajat_md5
+        return ('EGYEZIK' if egy else 'ELTER'), f'{os.path.basename(m[-1])} (felbontas: 24 ora)'
+    except Exception as e:
+        return 'MERETLEN', f'mentes-horgony hiba: {type(e).__name__}'
+
+_allapot, _horgony = _rogzitett_peldany(__file__, mero)
+print(f"ROGZITETT-PELDANY: {_allapot} -- horgony: {_horgony}")
+print("          NEM attribual, hanem KIZAR egy agat. EGYEZIK + mozdult mero_verzio -> a harom")
+print("          eredeti ag egyike (mas minta / mas korpusz / valodi uj uzenet). ELTER -> a mero")
+print("          nem rogzitett peldany volt, tehat a negyedik ag (nem commitolt allapot) NYITOTT.")
