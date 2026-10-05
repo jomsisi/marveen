@@ -48,8 +48,31 @@ for f in sorted(glob.glob(os.path.join(gyoker, '*.jsonl'))):
     sorok = 0
     for line in io.open(f, encoding='utf-8', errors='replace'):
         sorok += 1
-        for m in pat.finditer(line):
-            tal[int(m.group(1))] = m.group(2)
+        ms = pat.findall(line)
+        if not ms:
+            continue
+        # A SAJAT TESZT-SZOVEGEM BEKERULT A KORPUSZBA (kimerve 2026-10-05). A 2026-10-04-i
+        # channel-reply-guard pozitiv kontrollomhoz egy SZINTETIKUS `<channel ...>` taget gyartottam
+        # (`message_id=9001`), es az a sajat transzkriptembe is bekerult -- a mero innen olvas.
+        # A kar NEM a darabszam volt, hanem a tartalma: a tartomany felso vege 829 -> 9001, a
+        # NULLA-NAP 2 -> 1, es az "utolso bejovo" egy SOSEM LETEZETT uzenet lett. Vagyis a mero
+        # BEJOVO AKTIVITAST HAZUDOTT egy olyan napra, amikor Laura nem irt -- a KAPU 1 nyitottnak
+        # latszott volna.
+        # A KIZARAS A SOR SZEREPERE MEGY, NEM A MINTARA: ha a sor JSON-je `role: assistant`, akkor
+        # azt a szoveget EN irtam, nem erkezett.
+        # ES AMIERT NEM `role == 'user'` A FELTETEL (merve, 134 id-n): 89 id all sima `user` soron,
+        # 44 OLYAN soron, aminek a szerepet ez a kod NEM tudja kiolvasni (mas alak), es 1 (a 9001)
+        # `assistant`-on. A `user`-re SZUKITES tehat 44 VALODI id-t dobna el. A tagadas iranya a
+        # konzervativ: csak azt zarjuk ki, amirol BIZONYITHATO, hogy sajat iras.
+        # AMIT EZ NEM FOG MEG: ha egy teszt-szoveg olyan sorba kerul, aminek a szerepe `?`.
+        try:
+            _role = (json.loads(line).get('message', {}) or {}).get('role')
+        except Exception:
+            _role = None
+        if _role == 'assistant':
+            continue
+        for m in ms:
+            tal[int(m[0])] = m[1]
     fajlok.append(f"{os.path.basename(f)[:8]}:{sorok}")
 
 ids = sorted(tal)
