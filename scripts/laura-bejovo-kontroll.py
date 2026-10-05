@@ -43,6 +43,7 @@ def helyi(ts):
 gyoker = sys.argv[1] if len(sys.argv) > 1 else GYOKER
 pat    = re.compile(MINTA)
 tal    = {}
+kontroll_tal = {}
 fajlok = []
 for f in sorted(glob.glob(os.path.join(gyoker, '*.jsonl'))):
     sorok = 0
@@ -65,14 +66,36 @@ for f in sorted(glob.glob(os.path.join(gyoker, '*.jsonl'))):
         # `assistant`-on. A `user`-re SZUKITES tehat 44 VALODI id-t dobna el. A tagadas iranya a
         # konzervativ: csak azt zarjuk ki, amirol BIZONYITHATO, hogy sajat iras.
         # AMIT EZ NEM FOG MEG: ha egy teszt-szoveg olyan sorba kerul, aminek a szerepe `?`.
+        # >>> ES A TAGADAS HELYERE ALLOWLIST KERULT A SOR FAJTAJARA (2026-10-05 este, a boss
+        # konjunkcio-eszrevetele nyoman: a szerep ONMAGABAN nem dont, a szerep ES a sor FAJTAJA
+        # egyutt igen). MERVE mind a 134 id-n:
+        #     89 id   queue-operation + user/user
+        #     44 id   attachment + queue-operation          <- csak-mellekletes uzenetek
+        #      1 id   assistant/assistant                   <- a 9001-es fixturam
+        #   plumbing-sorral (queue-operation VAGY attachment) igazolt: 133 / 133 valodi
+        #   plumbing-sor NELKUL: PONTOSAN a 9001
+        # A `queue-operation` es az `attachment` sorokat a BEJOVO VEZETEK irja, nem a modell --
+        # tehat ezek ERKEZES-nyomok. A tagadas (`role != assistant`) ennel GYENGEBB: egy fixtura,
+        # ami TOOL-EREDMENYBEN jon vissza (pl. egy `cat` vagy `grep` kimenete), `user` szerepű
+        # soron all, es a tagadas ATENGEDNE. Ma ez csak azert nem sult el, mert a grep-kimeneteim
+        # CSONKAN tartalmaztak a taget, es a minta a TELJES alakot keri -- szerencse, nem szerkezet.
+        #
+        # ES A KET SZAM EGYMAS MELLE KERUL, CIMKEVEL (ugyanaz a fegyelem, mint a KAPU2-szamlalonal):
+        # ha egy jovobeli Claude Code valtozat MAR NEM ir plumbing-sort, az operativ szam csendben
+        # csokkenne -- de a kontroll-szam nem, tehat az ELTERES kiirodik. A teljes kiesest az
+        # `assert ids` fogja meg, hangosan.
         try:
-            _role = (json.loads(line).get('message', {}) or {}).get('role')
+            _ev   = json.loads(line)
+            _tip  = _ev.get('type')
+            _role = (_ev.get('message', {}) or {}).get('role')
         except Exception:
-            _role = None
-        if _role == 'assistant':
-            continue
-        for m in ms:
-            tal[int(m[0])] = m[1]
+            _tip, _role = None, None
+        if _tip in ('queue-operation', 'attachment'):
+            for m in ms:
+                tal[int(m[0])] = m[1]
+        if _role != 'assistant':
+            for m in ms:
+                kontroll_tal[int(m[0])] = m[1]
     fajlok.append(f"{os.path.basename(f)[:8]}:{sorok}")
 
 ids = sorted(tal)
@@ -139,6 +162,11 @@ print(f"MA ({datetime.date.today()}): {len(ma)} bejovo" + (f"  {ma}" if ma else 
 print(f"NULLA-NAP egymas utan: {nullas}")
 print(f"utolso bejovo: {ids[-1]}  {helyi(tal[ids[-1]])}")
 print(f"mero_verzio={mero}  korpusz={korpusz}  fajl={len(fajlok)} ({' '.join(fajlok)})")
+_k = sorted(kontroll_tal)
+print(f"SOR-FAJTA: operativ(plumbing: queue-operation|attachment)={len(ids)}   "
+      f"kontroll(gyengebb: role!=assistant)={len(_k)}"
+      + ("" if len(_k) == len(ids) else
+         f"   *** ELTERES {len(_k)-len(ids):+d}: {sorted(set(_k)-set(ids))[:6]} -- NEZD MEG ***"))
 
 # ===== ROGZITETT-PELDANY-EGYEZES (2026-10-04, a boss kikotesevel: agent_messages 8852) =====
 # MIERT: ma a `mero_verzio` ugy mozdult, hogy a kimenet harom szama BETURE valtozatlan maradt
