@@ -194,6 +194,20 @@ scripts/*.py
 !scripts/watchdog-inbound-prober.py
 !scripts/watchdog-userbot-login.py
 #
+# ES A NAPI OR-LANC OT SZKRIPTJE (2026-10-05, Zsolt jovahagyasa, Telegram 4524).
+# michel talalta meg (9020), es a meres nagyobb volt a jelzesnel: a `memoria-tukor` 08:40-es
+# lancaban MIND AZ OT szkript 0 committal allt, kozben a feladat kilepesi kodja az o ES-lancukon
+# all. Egy `git clean -xdf` nyomtalanul elvitte volna az egesz or-lancot, es a feladat utana
+# ugyanugy "lefutott" volna, csak nem ellenoriz semmit.
+# TITOK-MERES a felvett nyolcon: 0 talalat (password|secret|token|api_key|bearer|cim|kulcs).
+# A `scripts/juta-state-minta.sh` SZANDEKOSAN NEM KERULT FEL: az megnevez egy titok-kulcsot
+# (JUTA_INGEST_SECRET) es egy eles Railway-szolgaltatast -- kulon dontes ala tartozik.
+!scripts/memoria-tukor.py
+!scripts/memoria-index-ket-cim-egy-cel.py
+!scripts/utemezett-meret-or.py
+!scripts/belyeg-kor-or.py
+!scripts/kimaradt-kor-or.py
+#
 # ES UGYANEZ NEGY EGESZ KONYVTARRA (merve 2026-08-21, ugyanabban a korben): a
 # `scripts/kavosz/`, `scripts/hirlevel/`, `scripts/evedd/` es `scripts/pi/` alatt
 # EGYETLEN kovetett fajl sincs -- mind a negy teljes egeszeben egy konkret uzemeltetorol
@@ -227,6 +241,17 @@ scripts/pi/
 # es a `src/web/agent-scaffold.ts` MINDEN uj agensnek eloirja, kozben egyikuk sem volt a repoban.
 # A szabaly ezen annyit javit, hogy a termek-szkriptek listaja EGY helyen, lathatoan all.
 scripts/*.sh
+#
+# A NAPI OR-LANC HAROM SHELL-SZKRIPTJE (2026-10-05, Zsolt jovahagyasa, Telegram 4524).
+# ES EGY MERT CSAPDA A FELVETELROL: ezt a harom `!` sort ELOSZOR a `scripts/*.py` blokk ala
+# irtam (a 195. sor utan), es a `git check-ignore` szerint MEG IGNORALT maradt mind a harom --
+# mert a 246. sor `scripts/*.sh`-ja KESOBB all, es a gitignoreban a KESOBBI szabaly nyer.
+# A ket blokk ket KULON allow-listat tart fenn; egy `!` sor csak a SAJAT szabalya utan ervenyes.
+# A hiba NEM volt nema (a `check-ignore` kiirta), de a `git add` nelkule csendben kihagyta volna
+# oket -- es a commit "sikeres" lett volna harom fajllal kevesebb.
+!scripts/homoglif-szandekos-ellenorzes.sh
+!scripts/frissites-eloproba.sh
+!scripts/unas-utanvet-havi-export.sh
 !scripts/agent-msg-get.sh
 !scripts/agent-msg.sh
 !scripts/auth.sh
