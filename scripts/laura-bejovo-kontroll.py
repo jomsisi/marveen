@@ -189,6 +189,21 @@ print(f"SOR-FAJTA: operativ(plumbing: queue-operation|attachment)={len(ids)}   "
 #   mentes-horgony .... 24 ora felbontas, viszont gitignore-olt fajlra is mukodik
 # A ket horgony nem helyettesiti egymast: a durvabb felbontas annyit allit, hogy a fajl a hajnali
 # mentesben rogzitett allapot -- egy aznapi, mentes utani modositast NEM lat.
+# ===== A FUGGVENY MASODIK PELDANYA: scripts/auth-proba.py (2026-10-07) =====
+# A hivatkozas eddig EGYIRANYU volt: az `auth-proba.py` 248. sora megnevezi EZT a fajlt, ez a fajl
+# viszont semmit nem tudott a masik peldanyrol. Aki ITT nyul a fuggvenyhez, nem latja, hogy van
+# meg egy -- es a dokumentalt kar epp ez: ket implementacio egy szabalyra szetcsuszik, csendben.
+# MERVE (2026-10-07): a ket fuggveny-torzs BAJTRA azonos.
+#     laura-bejovo-kontroll.py:194-230   |   auth-proba.py:255-291
+#     mindket 37 soros blokk md5-je: b7055138f90bf89ac6bbbe410b5d5950
+# A DUPLIKACIO TUDATOS: a ket mezonek egymastol FUGGETLENUL kell merni (mindegyik ONMAGAT,
+# `__file__`-lel), tehat nem kozos modulba kivankozo kod.
+# ES EGY MERT ESET, AMIERT NEM ELEG A FUGGVENY-TORZSET EGYUTT TARTANI: 2026-10-07-en az
+# `auth-proba.py` peldanya NameError-t adott az ELO uton, mert ott a `hashlib` nem volt importalva
+# (javitva: 5d23c83). A torzs azonos volt, a KORNYEZETE nem -- vagyis masolas utan az IMPORTOKAT es
+# a hivasi oldalt is at kell nezni, nem csak a blokkot.
+# ELJARAS: ha ezt a fuggvenyt modositod, a masik fajlban is modositsd (es forditva); ha SZANDEKOSAN
+# tersz el, ird ide, miben es miert -- kulonben a kovetkezo olvaso azonosnak veszi.
 _REPO = '/root/marveen/marveen/marveen/marveen'
 
 def _rogzitett_peldany(ut, sajat_md5):
