@@ -31,6 +31,16 @@ from collections import Counter
 # PERTURBALT bemeneti fa (pl. egy szandekosan inditott folyamat a /proc-ban). Az ilyen belyeg NEM
 # hamis -- igaz allitas egy olyan vilagrol, amit en mozdítottam el --, tehat a kar kisebb; arra a
 # kapcsolo marad, mostantol FELULIRASKENT, nem vedelemkent.
+# >>> ES A `CLAUDE_CONFIG_DIR` A LISTA UJ TAGJA, DE SULYOSABB AZ ELOZOEKNEL (2026-10-05, a boss
+# sajat eseten, a futtato-mezo BEVEZETESEKOR). A felso bekezdes szerint a perturbalt bemenet "igaz
+# allitas egy olyan vilagrol, amit en mozditottam el" -- a futtato-mezonel ez NEM all, mert a
+# perturbalt ertek maga lesz a CIMKE. Az elso pozitiv kontrollom (env-vel atallitott futtato, elo
+# szkript, elo registry) `futtato=michel` sort irt az ELES belyegbe, tehat michel jaratarol allitott
+# valotlant -- epp arra a kerdesre hamis valaszt, amiert a mezo bekerult. Kivettem, es a tesztet a
+# kapcsoloval ismeteltem (`teszt_ok=env`).
+# A kodban NEM zarjuk be: a futtato egyetlen forrasa az env, tehat a szkript nem tudja
+# megkulonboztetni a valodit az atallitottol. A LEPES ezert eljaras: a futtato-tengely perturbalasa
+# MINDIG `MICHEL_BELYEG_TESZT=1`-gyel fusson.
 _ELO_REGISTRY = '/root/marveen/marveen/marveen/marveen/store/projektdir-or.json'
 _ELO_SZKRIPT  = '/root/marveen/marveen/marveen/marveen/scripts/auth-proba.py'
 _CFG_UT  = sys.argv[1] if len(sys.argv) > 1 else _ELO_REGISTRY
@@ -42,22 +52,76 @@ _TESZT   = (_MAS_REG or _MAS_SZK
 # munkakonyvtar NEM az, ahol a `store/` all -- relativ utra epiteni itt nemán elhibazott lenne.
 _BELYEG  = ('/root/marveen/marveen/marveen/marveen/store/michel-orjarat-belyeg-auth'
             + ('.teszt' if _TESZT else '') + '.txt')
+# A FUTTATO AZONOSITASA -- MERT AZ `ido` MEZO KULONBEN BARKI FUTASAT JELENTI (michel 8872,
+# 2026-10-05). Ma reggel EN futtattam a probat hatszor, es ezzel michel 03:33-as jaratanak nyoma
+# tiz perc alatt elveszett a belyegbol. Az irany a MEGNYUGTATO, ezert kell javitani: ha a jarat
+# egyszer CSENDBEN LEALL, de valaki mas lefuttatja a probat, a belyeg FRISS lesz, es a leallas nem
+# latszik -- pontosan az a kerdes, amiert a belyeg letezik.
+# A CIMKE SOHA NE LEGYEN HIHETO, DE KITALALT AGENS-NEV (michel mert buktatoja a reply-guard
+# `elif _cd: _AGENS = "boss"` else-agan): az `/agents/<nev>/` minta a MERT alak, minden mas a NYERS
+# utat viszi `nem-agents:` elotaggal. Merve 2026-10-05, mind a nyolc elo folyamat environjen:
+#   .../agents/michel/.claude-config   -> michel
+#   .../marveen/.channels-config       -> nem-agents:.channels-config   (ez a boss, de NEM nevezzuk el)
+#   /root/.boss-worker/.claude-config  -> nem-agents:.boss-worker       (a basename itt haszontalan)
+def _futtato():
+    cd = os.environ.get('CLAUDE_CONFIG_DIR', '')
+    if not cd:
+        return 'nincs-env'
+    reszek = [x for x in cd.rstrip('/').split('/') if x]
+    if 'agents' in reszek:
+        i = reszek.index('agents')
+        if i + 1 < len(reszek):
+            return reszek[i + 1]
+    nev = reszek[-1] if reszek else cd
+    if nev == '.claude-config' and len(reszek) > 1:
+        nev = reszek[-2]
+    return 'nem-agents:' + nev
+_FUTTATO = _futtato()
 _allapot = {'kod': 'megszakadt', 'jel': 'a szkript a belyeg-iras elott allt le'}
 
 def _belyeg_ir():
+    # FUTTATONKENT EGY SOR. Egyetlen "utolso futas" sor azt meri, hogy futott-e BARKI -- es a
+    # belyeg kerdese az, hogy futott-e a JARAT. A `futas` ezert szinten futtatonkenti.
     try:
-        futas = 1
+        megjegyzes, masok, futas = [], [], 1
         try:
-            for tok in io.open(_BELYEG, encoding='utf-8').read().split():
-                if tok.startswith('futas='):
-                    futas = int(tok.split('=', 1)[1]) + 1
+            for sor in io.open(_BELYEG, encoding='utf-8').read().splitlines():
+                if not sor.strip():
+                    continue
+                if not sor.startswith('proba='):
+                    # HORGONY, NEM KIZARAS (marci 8899, 2026-10-05). A korabbi alak a komment-
+                    # JELOLOT (`#`) zarta ki, vagyis egy NYITOTT halmazrol tett fel valamit: minden
+                    # nem-adat formatumot fel kell sorolnia, es azt a formatumot MASOK is irjak
+                    # (ez a fajl kezzel szerkesztett olvasasi-szabaly blokkot hordoz a tetejen).
+                    # A horgony az ADAT-SOR alakjat koti meg -- ZART halmaz, amit a SAJAT iro
+                    # allit elo (`sajat = f"proba=auth-proba  ..."`, lentebb). Egy behuzott
+                    # folytatas-sor vagy egy `//`-s jeloles a kizarast ATENGEDI, a horgonyt nem.
+                    # MERVE ugyanaznap a `memoria-index-minta.log`-on: ott EGY ilyen blokk ket
+                    # kulonbozo parse-ot tort el, es a ket hiba UGYANAZT a szamot adta (152),
+                    # ket DISZJUNKT sor-halmazon -- tehat az egyezes megerositesnek latszott.
+                    megjegyzes.append(sor); continue
+                tokenek = dict(t.split('=', 1) for t in sor.split('  ') if '=' in t)
+                f = tokenek.get('futtato')
+                if f is None:
+                    # REGI, FUTTATO NELKULI SOR: a szama MINDENKI futasat osszegezte, tehat egy
+                    # futtatora nem ervenyes. Nem dobjuk el (az idopont adat), de megjegyzesse
+                    # valik, hogy senki ne olvassa jelenlegi futtatonak.
+                    megjegyzes.append('# REGI, OSSZEVONT SOR (2026-10-05 elott, minden futtato egyben): '
+                                      + sor.strip())
+                elif f == _FUTTATO:
+                    try: futas = int(tokenek.get('futas', '0')) + 1
+                    except Exception: futas = 1
+                else:
+                    masok.append(sor)
         except Exception:
             pass            # nincs meg belyeg: ez az elso futas
+        sajat = (f"proba=auth-proba  futtato={_FUTTATO}"
+                 f"  ido={datetime.datetime.now().isoformat(timespec='seconds')}"
+                 f"  futas={futas}  kod={_allapot['kod']}  jel={_allapot['jel']}"
+                 + (f"  teszt_ok={'reg' if _MAS_REG else ''}{'szkript' if _MAS_SZK else ''}"
+                    f"{'env' if not (_MAS_REG or _MAS_SZK) else ''}" if _TESZT else ""))
         io.open(_BELYEG, 'w', encoding='utf-8').write(
-            f"proba=auth-proba  ido={datetime.datetime.now().isoformat(timespec='seconds')}"
-            f"  futas={futas}  kod={_allapot['kod']}  jel={_allapot['jel']}"
-            + (f"  teszt_ok={'reg' if _MAS_REG else ''}{'szkript' if _MAS_SZK else ''}"
-               f"{'env' if not (_MAS_REG or _MAS_SZK) else ''}" if _TESZT else "") + "\n")
+            '\n'.join(megjegyzes + sorted(masok + [sajat])) + '\n')
     except Exception:
         pass                # a belyeg SOHA ne bukjon el a proba HELYETT
 atexit.register(_belyeg_ir)
@@ -72,6 +136,15 @@ KIZART = set(cfg['kivetel'].keys())          # <- kizaro kulcs KIZAROLAG a `kive
 # (A korabbi `assert 'ismert' not in KIZART` csak egy `ismert` NEVU projektre sult volna el.)
 utkozes = KIZART & set(cfg.get('ismert', []))
 assert not utkozes, f"ELO fa a kivetelben: {sorted(utkozes)}"
+# ES AZ ISMERETLEN-ALAK AG EGY URES LISTAN CSENDBEN KIKAPCSOL (michel 8872, 2026-10-05). A lenti
+# feltetel `if ISMERT_ALAK and t.strip() not in ISMERT_ALAK`, tehat a rovidzar miatt ures listaval
+# egyetlen sor sem lesz "uj alak", es a kimenet BETURE ugy nez ki, mint a tiszta eredmeny. Ez nem
+# elmeleti: ez az ag a HORDOZOJA annak az ervelesnek, hogy egy ora-valtas (`resets 12pm`) jelzest
+# kap -- ha kiurul, a jelzes eltunik, es egyedul a fajta-SZAM marad, amirol epp kimondtuk, hogy
+# nem lelet. Ugyanaz a fail-closed kerdes, mint a `kivetel`-nel: a registry hianya NE csendes
+# atengedes legyen. Az exit-kod SZANDEKOSAN 1, a fenti assert-tel egy osztalyban (registry-hiba),
+# hogy ne szuletjen harmadik jelentes ugyanarra a kodra.
+assert ISMERT_ALAK, "a registry `ismert_alakok` listaja URES -- az ismeretlen-alak ag kikapcsolna"
 
 def projekt(path):
     rel = os.path.relpath(path, ROOT)
@@ -152,11 +225,29 @@ if uj_alak:
     print(f"  *** ISMERETLEN ALAK: {len(uj_alak)} -- nezz ra, es ha rendben, vedd fel az `ismert_alakok` koze ***")
     for ts, p, t in uj_alak[:5]:
         print(f"      {ts}  [{p}]  {t[:110]}")
-print("  fajtak (elo fa):")
-for s, n in fajta.most_common(6):
+# MIND a fajta kiirodik, es a fejlec KIMONDJA az osszeget. A `most_common(6)` cap csendes
+# egy-elterest adott a (b)-hez kepest (michel merte, 2026-10-05: a kiirt hat sor 549, a (b) 550),
+# es a tevedes iranya a MEGNYUGTATO -- az olvaso kevesebb hibat lat, mint amennyi van. A cap
+# nelkul a `sum(fajta.values()) == elo_total` SZERKEZETI azonossag (a szamlalo ugyanabban az
+# `else:` agban no, mint az `elo_total`), tehat a rovat ettol kezdve ONMAGAT egyezteti a (b)-vel.
+# A fejlec NEM azt ALLITJA, hogy az osszeg egyezik, hanem MEGMONDJA. Egy prozai "= (b)" az
+# olvasora bizza a kivonast, es pont az a lepes maradt ki eddig is.
+_fsum = sum(fajta.values())
+print(f"  fajtak (elo fa): {len(fajta)} fajta, osszesen {_fsum}"
+      + (f" = (b)" if _fsum == elo_total else
+         f"  *** != (b)={elo_total} -- A ROVAT NEM TELJES ***"))
+for s, n in fajta.most_common():
     print(f"      {n:5d}  {s}")
 # A (d) NEM bukik el: csak all. Kilepesi kod kizarolag az ELO fa auth-talalatara.
 _allapot.update(kod=2 if elo_auth else 0,
                 jel=f'a={len(elo_auth)}:b={elo_total}:d={kiz_total}:fajl={len(files)}'
-                    f':uj_alak={len(uj_alak)}')
+                    f':uj_alak={len(uj_alak)}:fajtak={len(fajta)}')
+# A `fajtak` CSENDESEN kerul a belyegbe, jelzes NELKUL, es ez szandekos (michel merese, 2026-10-05).
+# A kulcs `[:52]`, es a `resets 12pm` token az egyik ismert alakban a 31. karakteren all (a kulcson
+# BELUL), a masikban a 81-en (kivul). Amikor a vendor atirja az orat, az elso alak UJ kulcsot kap,
+# tehat a fajta-SZAM nő informacio nelkul -- es a fenti osszeg-azonossag erre VAK, mert az osszeg
+# helyes marad. A szam-novekedes viszont NEM lelet, tehat hangos jelzes allando hamis pozitiv lenne;
+# az ESEMENYT amugy is a megfelelo mechanizmus jelzi: az `uj_alak` ag a TELJES szoveget veti ossze
+# (`t.strip() not in ISMERT_ALAK`), tehat az uj ora-ertek ott jon ki, a mar dokumentalt teendovel.
+# A belyegbe azert kerul be, hogy a "mikor valtozott" kerdes KESOBB megvalaszolhato legyen.
 sys.exit(2 if elo_auth else 0)
