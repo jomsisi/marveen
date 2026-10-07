@@ -4,7 +4,7 @@
 A kizaras kulcsa KIZAROLAG a registry `kivetel` objektuma. Az `ismert` listat SOHA nem olvassuk:
 az az ELO agens-fakat sorolja fel, es azt kizarni pont a merest oltana ki.
 """
-import json, sys, re, os, glob, atexit, datetime, io
+import json, sys, re, os, glob, atexit, datetime, io, hashlib
 from collections import Counter
 
 # FUTAS-BELYEG -- MERT A NEM FUTO PROBA UGYANUGY NEZ KI, MINT A TISZTA (2026-09-30, a boss
@@ -290,7 +290,7 @@ def _rogzitett_peldany(ut, sajat_md5):
     except Exception as e:
         return 'MERETLEN', f'mentes-horgony hiba: {type(e).__name__}'
 
-_rp_md5 = __import__('hashlib').md5(io.open(__file__, 'rb').read()).hexdigest()[:12]
+_rp_md5 = hashlib.md5(io.open(__file__, 'rb').read()).hexdigest()[:12]
 _rp_all, _rp_horgony = _rogzitett_peldany(__file__, _rp_md5)
 print(f"  ROGZITETT-PELDANY: {_rp_all} -- horgony: {_rp_horgony}   (sajat md5: {_rp_md5})")
 print("      NEM attribual, hanem KIZAR egy agat: EGYEZIK -> a KOMMITOLT allapot nem valtozott")
