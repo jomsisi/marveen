@@ -239,6 +239,63 @@ print(f"  fajtak (elo fa): {len(fajta)} fajta, osszesen {_fsum}"
 for s, n in fajta.most_common():
     print(f"      {n:5d}  {s}")
 # A (d) NEM bukik el: csak all. Kilepesi kod kizarolag az ELO fa auth-talalatara.
+# ===== ROGZITETT-PELDANY (2026-10-07, a boss keresere: 9243 (4) pont) =====
+# MIERT IDE IS: 2026-10-06-an megmertem, hogy a harom meroeszkozom kozul a horgony-mezo PONT ott
+# van, ahol nincs mit jelentenie (`laura-bejovo-kontroll.py`, HEAD-tol egyezik), es PONT ott nincs,
+# ahol lenne -- ez a fajl 102 sorral tert el a HEAD-tol, horgony nelkul, es a hajnali jarat negy
+# szama ket napon at rogzitetlen kod-identitasbol jott.
+#
+# A FUGGVENY SZO SZERINT ATVETT a `scripts/laura-bejovo-kontroll.py`-bol, es ez TUDATOS duplikacio:
+# a ket mezonek egymastol FUGGETLENUL kell merni (mindegyik ONMAGAT, `__file__`). A dokumentalt
+# kockazat, hogy ket implementacio egy szabalyra szetcsuszik, ezert KERESZT-HIVATKOZASSAL van
+# kezelve: ha ezt a fuggvenyt itt modositod, a MASIK fajlban is modositsd (es forditva).
+# A mezo NEM attribual, hanem KIZAR egy agat, es megnevezi a horgonyt (git vagy napi mentes).
+_REPO = '/root/marveen/marveen/marveen/marveen'
+
+def _rogzitett_peldany(ut, sajat_md5):
+    """(allapot, horgony) -- 'EGYEZIK' / 'ELTER' / 'MERETLEN', es a horgony megnevezese."""
+    import subprocess, tarfile
+    val = os.path.realpath(ut)
+    # A MERO LEHET A REPON KIVUL (teszt-masolat, /tmp): ilyenkor a `relpath` `../..`-alakot ad, es
+    # MINDKET horgony-kereses felreertheto hibaval bukna. Ezt ki kell mondani, nem tunet-szinten.
+    if os.path.commonpath([val, _REPO]) != _REPO:
+        return 'MERETLEN', f'a mero nem a repo faban all: {val}'
+    rel = os.path.relpath(val, _REPO)
+    def _git(*a):
+        return subprocess.run(('git', '-C', _REPO) + a, capture_output=True, timeout=20)
+    # 1. git-horgony, ha a fajl kovetett
+    try:
+        if _git('ls-files', '--error-unmatch', '--', rel).returncode == 0:
+            blob = _git('show', f'HEAD:{rel}')
+            sha  = _git('rev-parse', '--short', 'HEAD').stdout.decode().strip()
+            if blob.returncode == 0:
+                egy = hashlib.md5(blob.stdout).hexdigest()[:12] == sajat_md5
+                return ('EGYEZIK' if egy else 'ELTER'), f'HEAD {sha} (felbontas: 1 commit)'
+    except Exception as e:
+        return 'MERETLEN', f'git-horgony hiba: {type(e).__name__}'
+    # 2. mentes-horgony a nem kovetett (pl. gitignore-olt) fajlra
+    try:
+        m = sorted(glob.glob(os.path.join(_REPO, 'backups', 'claudeclaw-*.tar.gz')))
+        if not m:
+            return 'MERETLEN', 'nincs se git-horgony, se mentes'
+        with tarfile.open(m[-1]) as t:
+            try:
+                f = t.extractfile(f'repo/{rel}')
+            except KeyError:
+                return 'MERETLEN', f'a mentesben nincs benne: repo/{rel}'
+            if f is None:
+                return 'MERETLEN', f'a mentesben nem sima fajl: repo/{rel}'
+            egy = hashlib.md5(f.read()).hexdigest()[:12] == sajat_md5
+        return ('EGYEZIK' if egy else 'ELTER'), f'{os.path.basename(m[-1])} (felbontas: 24 ora)'
+    except Exception as e:
+        return 'MERETLEN', f'mentes-horgony hiba: {type(e).__name__}'
+
+_rp_md5 = __import__('hashlib').md5(io.open(__file__, 'rb').read()).hexdigest()[:12]
+_rp_all, _rp_horgony = _rogzitett_peldany(__file__, _rp_md5)
+print(f"  ROGZITETT-PELDANY: {_rp_all} -- horgony: {_rp_horgony}   (sajat md5: {_rp_md5})")
+print("      NEM attribual, hanem KIZAR egy agat: EGYEZIK -> a KOMMITOLT allapot nem valtozott")
+print("      alattam; ELTER -> a futo kod NEM rogzitett peldany. A FUTO kodrol csak ennyit mond.")
+
 _allapot.update(kod=2 if elo_auth else 0,
                 jel=f'a={len(elo_auth)}:b={elo_total}:d={kiz_total}:fajl={len(files)}'
                     f':uj_alak={len(uj_alak)}:fajtak={len(fajta)}')
