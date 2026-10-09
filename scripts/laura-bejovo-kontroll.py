@@ -221,7 +221,7 @@ def _rogzitett_peldany(ut, sajat_md5):
     try:
         if _git('ls-files', '--error-unmatch', '--', rel).returncode == 0:
             blob = _git('show', f'HEAD:{rel}')
-            sha  = _git('rev-parse', '--short', 'HEAD').stdout.decode().strip()
+            sha  = _git('rev-parse', '--short=12', 'HEAD').stdout.decode().strip()
             if blob.returncode == 0:
                 egy = hashlib.md5(blob.stdout).hexdigest()[:12] == sajat_md5
                 return ('EGYEZIK' if egy else 'ELTER'), f'HEAD {sha} (felbontas: 1 commit)'
