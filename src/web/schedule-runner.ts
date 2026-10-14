@@ -1059,25 +1059,32 @@ function sendSchedulerAlertMessage(token: string, chatId: string, text: string):
 }
 
 // One line about what the scheduler missed while it was down: which tasks it
-// caught up, and which were too stale to be worth running. Sent once per tick
-// that produced any such entry -- in normal operation that is never, so the
-// channel stays quiet. This is the reporting half of the catch-up policy: a
-// missed occurrence either runs or gets named, never both and never neither.
+// caught up, and which were too stale to be worth running. This is the
+// reporting half of the catch-up policy: a missed occurrence either runs or
+// gets named, never both and never neither.
+//
+// THE CHANNEL ONLY HEARS ABOUT THE SECOND HALF (owner's decision, 2026-09-26).
+// A caught-up occurrence cost nothing: the task ran, a couple of minutes late.
+// Measured before the change: all 12 alerts the log had ever produced carried
+// `stale: 0`, i.e. not one of them reported a real loss -- and their actual
+// cause is our own tick-loop lag (the 4-hourly kanban-audit injection pushes
+// the :05 task past the 90s late threshold, which is why the 12:06/16:06/20:06
+// copies all look alike). An alert that has never once meant a loss trains the
+// reader to ignore the one that will.
+//
+// BUT THE LOG LINE STAYS, IN BOTH BRANCHES, AND THAT IS NOT COSMETIC. It is the
+// only place where "did a catch-up happen today?" can be answered: `task_runs`
+// cannot answer it for a `type: command` task, because that path never receives
+// `lateCatchUpMs` and its row is a plain `fired` (measured 2026-09-26 --
+// `memoria-index-minta` ran 109s late as a catch-up while the `fired_late`
+// count for the day stayed 0). Suppressing the send without keeping the log
+// would silence the measuring instrument along with the noise. Both branches
+// share the `catch-up summary alert` prefix so one grep still finds both.
 function sendCatchUpSummary(
   caughtUp: Array<{ task: string; ageMs: number }>,
   stale: Array<{ task: string; ageMs: number }>,
   gapMs: number,
 ): void {
-  const token = resolveSchedulerAlertToken()
-  if (!token) {
-    logger.warn({ provider: CHANNEL_PROVIDER }, 'catch-up summary suppressed: no channel bot token (config error)')
-    return
-  }
-  const ownerChat = resolveSchedulerOwnerChat()
-  if (!ownerChat) {
-    logger.warn({ provider: CHANNEL_PROVIDER }, 'catch-up summary suppressed: no owner chat (ALLOWED_CHAT_ID unset/placeholder and no paired channel)')
-    return
-  }
   const mins = (ms: number) => `${Math.round(ms / 60000)} perc`
   const lines = [`[${BOT_NAME} scheduler] Kimaradt ütemezés (${mins(gapMs)} kiesés).`]
   if (caughtUp.length) {
@@ -1091,10 +1098,41 @@ function sendCatchUpSummary(
     lines.push('Ezek a dashboard /Ütemezések oldalán kézzel indíthatók.')
   }
   const text = lines.join('\n')
+
+  // Nothing was left undone -> the log keeps the record, the channel stays out
+  // of it. Named tasks go into the line too: without them the log says a
+  // catch-up happened but not which one, and that is the question it exists for.
+  if (!stale.length) {
+    logger.info(
+      {
+        caughtUp: caughtUp.length,
+        stale: 0,
+        tasks: caughtUp.map(e => e.task),
+        gapMs,
+        provider: CHANNEL_PROVIDER,
+      },
+      'catch-up summary alert withheld: every missed occurrence was caught up (stale=0)',
+    )
+    return
+  }
+
+  const token = resolveSchedulerAlertToken()
+  if (!token) {
+    logger.warn({ provider: CHANNEL_PROVIDER }, 'catch-up summary suppressed: no channel bot token (config error)')
+    return
+  }
+  const ownerChat = resolveSchedulerOwnerChat()
+  if (!ownerChat) {
+    logger.warn({ provider: CHANNEL_PROVIDER }, 'catch-up summary suppressed: no owner chat (ALLOWED_CHAT_ID unset/placeholder and no paired channel)')
+    return
+  }
   ;(async () => {
     try {
       await sendSchedulerAlertMessage(token, ownerChat, text)
-      logger.info({ caughtUp: caughtUp.length, stale: stale.length, provider: CHANNEL_PROVIDER }, 'catch-up summary alert sent')
+      logger.info(
+        { caughtUp: caughtUp.length, stale: stale.length, tasks: stale.map(e => e.task), provider: CHANNEL_PROVIDER },
+        'catch-up summary alert sent',
+      )
     } catch (err) {
       logger.warn({ err }, 'catch-up summary delivery failed')
     }

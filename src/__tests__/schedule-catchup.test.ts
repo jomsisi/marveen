@@ -179,3 +179,49 @@ describe('the runner wires the policy in', () => {
     expect(SRC).toMatch(/if \(caughtUpThisTick\.length \|\| staleThisTick\.length\) \{/)
   })
 })
+
+// 2026-09-26, owner's decision: the channel only hears about the half that cost
+// something. All 12 alerts the log had ever produced carried `stale: 0` -- an
+// alert that has never once meant a loss trains the reader to ignore the one
+// that will. What must NOT go with the noise is the log line: it is the only
+// place where "did a catch-up happen today?" is answerable, because a
+// `type: command` task's catch-up lands in `task_runs` as a plain `fired`.
+describe('the catch-up channel alert is gated on loss, the log line is not', () => {
+  const FN = (() => {
+    const start = SRC.indexOf('function sendCatchUpSummary(')
+    expect(start).toBeGreaterThan(0)
+    const end = SRC.indexOf('\nfunction ', start + 1)
+    expect(end).toBeGreaterThan(start)
+    return SRC.slice(start, end)
+  })()
+
+  it('returns before sending when nothing was left undone', () => {
+    const gate = FN.indexOf('if (!stale.length) {')
+    expect(gate).toBeGreaterThan(0)
+    // The early return has to stand BEFORE the send, or the gate decides nothing.
+    expect(gate).toBeLessThan(FN.indexOf('sendSchedulerAlertMessage('))
+    expect(FN.slice(gate, FN.indexOf('sendSchedulerAlertMessage('))).toMatch(/\n    return\n/)
+  })
+
+  it('resolves the token and the owner chat only on the delivering branch', () => {
+    // Otherwise every quiet caught-up tick would emit a config-error warning,
+    // and a permanent false alarm is what makes a signal unusable.
+    expect(FN.indexOf('if (!stale.length) {')).toBeLessThan(FN.indexOf('resolveSchedulerAlertToken()'))
+  })
+
+  it('logs on BOTH branches under one greppable prefix (the measuring instrument)', () => {
+    const lines = FN.match(/'catch-up summary alert [^']*'/g) ?? []
+    expect(lines.length).toBe(2)
+    expect(lines.some(l => l.includes('sent'))).toBe(true)
+    expect(lines.some(l => l.includes('withheld'))).toBe(true)
+  })
+
+  it('names the tasks in the withheld line, not just a count', () => {
+    // "a catch-up happened" without WHICH one does not answer the question the
+    // line exists for.
+    const gate = FN.indexOf('if (!stale.length) {')
+    const branch = FN.slice(gate, FN.indexOf('const token ='))
+    expect(branch).toMatch(/tasks: caughtUp\.map\(e => e\.task\)/)
+    expect(branch).toMatch(/logger\.info\(/)
+  })
+})

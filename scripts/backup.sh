@@ -11,7 +11,7 @@
 #     scheduled-tasks.json     (legacy, if present)
 #     assets/meetings/**       (meeting transcripts/memos)
 #     store/hirlevel-lista, store/reports          (personal data: LOCAL package only)
-#     scripts/browser/**, scripts/trafik-postafiok-figyeles.sh
+#     scripts/**/*.{sh,py,mjs,cjs}, store/*.{sh,py}   (az uzemelteto eszkoztar; lasd lentebb)
 #     store/mennyiseg-meres/*.py|cjs               (the scripts, not the raw store data)
 #     agents/*/memory/**                           (per-agent memory pages)
 #     agents/*/CLAUDE.md, SOUL.md, .mcp.json
@@ -93,13 +93,32 @@ add_if "${REPOLIST}" "${REPO_ROOT}" store/config-overrides.json
 # maradnia. A mi-club-export KIMARAD: 370 MB, es a MI Clubbol barmikor ujraletoltheto.
 add_if "${REPOLIST}" "${REPO_ROOT}" store/hirlevel-lista
 add_if "${REPOLIST}" "${REPO_ROOT}" store/reports
-# EGY FUTO AUTOMATIZMUS EGYETLEN PELDANYA (safar merte ki 2026-09-16, boss visszamerte).
-# Ezek a fajlok a `.gitignore` `scripts/*.sh|mjs` es `store/` szabalyai ala esnek, tehat NINCS
-# verziokovetesuk, es eddig egyik mentes sem vitte oket. A `webmail-erkezettek.mjs`-t HAROM
-# utemezett feladat hivja (sajat-postafiok-valasz-figyeles, evedd-ugyeleti-jelentes,
-# trafik-jelentes-postafiok-figyeles) -- ha elveszik, mindharom NEMAN elhal.
-add_if "${REPOLIST}" "${REPO_ROOT}" scripts/trafik-postafiok-figyeles.sh
-add_if "${REPOLIST}" "${REPO_ROOT}" scripts/browser
+# AZ UZEMELTETO ESZKOZTAR, FOGALOMKENT -- NEM NEVEKKENT (2026-09-24; a fenti KNOWN GAP
+# bekezdes sajat kikotese: ha a hatokor tagul, ezeket a sorokat FOGALOMKENT kell ujrairni,
+# kulonben a kovetkezo tagitas megint egy HELYET masol).
+#
+# A FOGALOM: futtathato eszkoz a repoban, aminek NINCS verziokovetese (a `.gitignore`
+# `scripts/*.py|*.sh|*.mjs` es `store/` szabalyai ala esik), tehat elvesztes eseten
+# UJRA KELLENE IRNI. A ket szuro, amit a header kimond, mindketto teljesul:
+#   (1) ujraeloallitasi koltseg: igen -- ezek kezzel epitett eszkozok;
+#   (2) nem szabad szivarognia: megmerve 2026-09-24, a 191 jelolt fajlban NULLA beagyazott
+#       titok (a talalatok mind vault-KULCSNEVEK vagy fuggvenyhivasok, nem ertekek).
+#       A szures pozitiv kontrollal futott (szandekosan rontott minta -> talalat).
+#
+# MIERT NEM ELEG A NEVSOR (ez a sor elozmenye): 2026-09-16-ban ket NEVET vettunk fel
+# (`trafik-postafiok-figyeles.sh`, `scripts/browser`), es a header 2026-09-18-ban mar
+# rogzitette, hogy 45 tovabbi fajl kimarad -- koztuk a homoglif-kapu, amit az egesz flotta
+# futtat, ES MAGA EZ A MENTO SZKRIPT. Egy nevsor alapertelmezese a NEM VEDETT, es nemam:
+# minden uj eszkoz kivul kezd, es errol semmi nem szol (safar alakja, 2026-09-24).
+#
+# A `.bak*` es `*ELOTTE*` masolatok KIMARADNAK: azok elavult peldanyok, es a header
+# kikotese all -- a hatokort nem "mindenre, ami hianyzik" tagitjuk.
+( cd "${REPO_ROOT}" && find scripts -type f \
+    \( -name '*.sh' -o -name '*.py' -o -name '*.mjs' -o -name '*.cjs' \) \
+    ! -name '*.bak*' ! -name '*ELOTTE*' -print ) >> "${REPOLIST}"
+( cd "${REPO_ROOT}" && find store -maxdepth 1 -type f \
+    \( -name '*.sh' -o -name '*.py' \) \
+    ! -name '*.bak*' ! -name '*ELOTTE*' -print ) >> "${REPOLIST}"
 # A `mennyiseg-meres` konyvtarbol CSAK A SZKRIPT megy, a nyers bolti adat NEM: az ~10 MB naponta,
 # ujraeloallithato a boltbol, es ugyanaz a titok-kerdes all ra, amit a `store/*.csv`-nel mar
 # felvetettunk. A szkript viszont potolhatatlan (pl. az `ar-elteres-boltok-kozott.cjs` hordozza
@@ -123,6 +142,53 @@ fi
 # them, so git is not a second copy either. Five dirs, one page each today.
 if [[ -d agents ]]; then
   find agents -mindepth 2 -maxdepth 2 -type d -name 'memory' -print >> "${REPOLIST}"
+fi
+
+# Per-agent WORK PRODUCTS (2026-10-05, Zsolt's approval on Telegram 4528).
+#
+# The comment above already carried the reason, and it covers these too, word for word:
+# they live in the REPO, not under $HOME, and `.gitignore` covers them, so git is not a
+# second copy either. The scope choice took `memory` and left everything else -- and the
+# header's own promise (`scripts/**/*.{sh,py,mjs,cjs}`) is anchored at the ROOT, so it
+# never covered agents/*/scripts either, while reading as though it did. marci and michel
+# measured the result independently: `agents/*/scripts/` and michel's work dirs had ZERO
+# entries in the tarball, while `agents/*/memory` had ten. Two deliberate exclusions
+# (`.gitignore:29` for the whole agents/ tree, and this allow-list) each correct on their
+# own, together giving zero copies of 48 files -- 30 of them Laura's material: the CV, the
+# four professional letters, the gravida questionnaire, the figures, the bibliography.
+# That is agreed work, not tooling, and the repo being PUBLIC is exactly why the backup is
+# its right home rather than git.
+#
+# WHY A DENYLIST AND NOT A LIST OF WORK DIRS: a named include-list goes stale in silence --
+# a new work dir simply would not be backed up, and nothing would say so. An exclusion is
+# the other direction: a new dir is covered by default, and if someone adds another bulk
+# generator the backup SIZE jumps, which is visible. For a backup the safe failure is
+# including too much.
+#
+# MEASURED COST (2026-10-05): 647 files / 54 MB, against an 84 MB tarball. A per-file size
+# cap was tried first and REJECTED by measurement: only 2 files exceed 2 MB, yet the total
+# is 179 MB, because agents/marci/kreativ holds generated images in the 256 kB - 1 MB band.
+# A size threshold cannot separate work products from generated output here.
+#
+# AND THE EXCLUSION IS TYPE *AND* LOCATION, which took two corrections to get right.
+# First it excluded the whole kreativ directory. marci measured that 629 was the FILE count,
+# not the image count: 447 images / 135 MB, but 182 non-images / 1.7 MB -- among them 16 code
+# files (3 .py, 13 .mjs), 107 landing elements (html+css) and 29 blog drafts (.md). The image
+# generator does not recreate those, so excluding the directory dropped 1.7 MB of real work.
+# His fix was to exclude the TYPE instead of the PLACE, which is the better axis -- but a bare
+# type rule measures wider than the question: michel has 18 images outside kreativ, ELEVEN of
+# them in abrak/ and abrak/netrol, and those are Laura's figures, the very material Telegram
+# 4528 approved putting in. lucky has 14 more under store/torzslista. A pure *.png exclusion
+# would have quietly undone part of the fix it was improving.
+# So the condition is the CONJUNCTION: an image AND inside the one bulk generator. Both
+# properties survive -- it is still an exclusion, so a new work dir is covered by default, and
+# it is tied to what is genuinely regenerable rather than to what merely correlates with it.
+# Cost of keeping the non-image part: +1.7 MB on a 118 MB tarball, 1.4%.
+if [[ -d agents ]]; then
+  find agents -mindepth 2 -type f \
+    ! -path '*/node_modules/*' ! -path '*/.git/*' ! -path '*cache*' \
+    ! \( -path 'agents/marci/kreativ/*' \( -name '*.png' -o -name '*.webp' \) \) \
+    -print >> "${REPOLIST}"
 fi
 
 # home/ group (relative to $HOME)

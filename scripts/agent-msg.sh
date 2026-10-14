@@ -66,21 +66,16 @@ C="$(cat)"
 # A Cyrillic letter inside an id or a command produces a NO-MATCH later, not an error now, so nothing
 # else in the pipeline can catch it. The text is still sent: a cosmetic character must never block a
 # message that is otherwise correct.
-HOMOGLYPHS="$(printf '%s' "$C" | python3 -c '
-import sys,re
-s=sys.stdin.read()
-w=sorted({m for m in re.findall(r"\S*[\u0400-\u04FF]\S*", s)})
-# A SZO ES A KODPONT EGYUTT MEGY KI, es ez nem reszletesseg.
-# A szo megmondja, HOL keresd; a kodpont azt, MIT irj a magyarazatba. Ha csak a szot adjuk
-# vissza, a kapu ugyanabban a pillanatban a HIBAS ALAKOT teszi a kezedbe -- es a kovetkezo
-# lepes tipikusan az, hogy bemasolod a javitasrol szolo szovegbe. 2026-09-11: negy elofordulas
-# egy napon, ketto kozuluk EPP a jelensegrol szolo magyarazatban, mindketto masolassal.
-def jel(x):
-    kp = " ".join("U+%04X" % ord(c) for c in dict.fromkeys(c for c in x if "\u0400" <= c <= "\u04FF"))
-    return x + " [" + kp + "]"
-print(" ".join(jel(x) for x in w[:6]))' 2>/dev/null)"
+# A KRITERIUM 2026-10-02 ELOTT `[\u0400-\u04FF]` VOLT, vagyis CSAK CIRILL -- es egy arab
+# betu ezen NEMAN atment (marci merte ki a sajat kimeno uzeneten, msg 8549). A jelenseg
+# VEGYES IRASRENDSZERU SZO, nem "cirill tartomany": egy eset-lista pontosan az uj esetre vak.
+# A tagabb alak 2026-09-02 ota MAR allt a kimeno kapuban, es a homoglif-ellenorzes.py MAR
+# azt importalta -- csak ez a harom shell-ut maradt a szuk alakon. Egy implementacio, negy
+# fogyaszto: scripts/homoglif-jelzes.py. A stderr SZANDEKOSAN nincs elnyelve: ha a szkript
+# hianyzik, az latszodjon, kulonben a vedelem elvesztese ures kimenetnek latszik.
+HOMOGLYPHS="$(printf '%s' "$C" | python3 "$(dirname "${BASH_SOURCE[0]}")/homoglif-jelzes.py")"
 if [ -n "$HOMOGLYPHS" ]; then
-  echo "WARN: cyrillic homoglyph(s) in the message -- sending anyway, but these will NOT be found by a" >&2
+  echo "WARN: mixed-script VAGY LATHATATLAN (Cf) karakter(ek) in the message -- sending anyway, but these will NOT be found by a" >&2
   echo "      later grep/search: $HOMOGLYPHS" >&2
 fi
 

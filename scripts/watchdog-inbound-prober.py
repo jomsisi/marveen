@@ -100,7 +100,9 @@ async def main() -> None:
     allowed_chat_id_raw = env.get("ALLOWED_CHAT_ID", "").strip()
     if not allowed_chat_id_raw:
         print(
-            "inbound-prober: ALLOWED_CHAT_ID absent in .env -- exiting as safe no-op",
+            "inbound-prober: no usable ALLOWED_CHAT_ID line found in .env "
+            "(the key may be present but in a form this parser does not read, "
+            'e.g. "export KEY=value") -- exiting as safe no-op',
             file=sys.stderr,
         )
         sys.exit(0)

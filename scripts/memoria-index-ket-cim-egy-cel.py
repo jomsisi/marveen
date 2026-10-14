@@ -122,6 +122,17 @@ for f in FAJLOK:
             szam_lelet.append((f, cel, sorted(sz, key=int)))
 
 horog_lelet = []
+# ---------------------------------------------------------------------------
+# NEGYEDIK PROBA (marci merte, agent_messages 9219/9229): A SZOVEG LAP-HOROG, A CEL AZ INDEX.
+# MIERT NEM FEDI LE A HAROM: a horog-proba ALATTA ALLO `continue`-ja KIZARJA az indexre
+# mutato linkeket -- epp azt a halmazt, amiben a 2026-10-05-i ket valodi hiba allt. marci
+# prototipusa ugyanebbe futott: `cel == IDX2 ... continue`, es a POZITIV kontroll a rontott
+# masolaton `47 jelolt | 0 LELET`-et adott. Ugyanaz az alak, mint a fajl 25-26. soraban
+# dokumentalt eset: a kontroll nem a probat merte, hanem a sajat utjat.
+# A VALASZTO A SZOVEG: egy `lapjegyz`-et tartalmazo horog LEGITIM sor-veg (a ket index
+# egymasra mutato sora); barmi mas lap-horog az indexre mutatva ELVESZETT cel.
+jegyzek_lelet = []
+jegyzek_vizsgalt = [0]
 # >>> A HOROG-PROBA MOSTANTOL MIND A KET INDEXET OLVASSA (2026-10-05 este). <<<
 # 2026-10-04-en megmertem, hogy a kiterjesztes +20 vizsgalt sort es NULLA leletet hozna, tehat
 # "nem javitas, csak nagyobb nevezo" -- es akkor ez IGAZ volt. A boss aznapi osszevonasa (99 -> 40
@@ -148,12 +159,44 @@ for _ip_nev in FAJLOK:
           if szo and not any(w in lap for w in szo):
               horog_lelet.append((f'{_ip_nev}:{i + 1}', cel, len(szo), cim))
 
+# A NEGYEDIK PROBA CIKLUSA: MINDEN LINK A SORBAN, NEM CSAK A SOR ELEJI.
+# >>> EZT A POZITIV KONTROLL KENYSZERITETTE KI, A SAJAT ELSO ALAKOM ELLEN. <<<
+# Eloszor a horog-ciklusba tettem, ami `^- \[cim\](cel)` alakra horgonyzott -- es a ket VALODI
+# 2026-10-05-i hiba a MEMORY.md 18. es 20. soran allt, TEMA-sorok KOZEPEN. A sor-horgonyzott alak
+# nevezoje 2 volt (a ket legitim LOGO kereszt-mutato), a leletje 0, es a negativ kontroll ATMENT --
+# vagyis egy orokre 0-t jelento proba lett volna. marci prototipusa a TUKOR-hibaba futott
+# (`cel == IDX2 ... continue`, 47 jelolt / 0 lelet ugyanazon a masolaton).
+# ES A VALASZTO A LINK SZOVEGE, NEM A SORE: egy TEMA-sor VEGEN all a legitim
+# `[lapjegyzek](index-teljes-lapjegyzek.md)` trailer, tehat a sor MINDIG tartalmaz "lapjegyz"-et --
+# soronkent dontve a trailer ELFEDNE a sor kozepen allo hibas linket.
+for _ip_nev in FAJLOK:
+  ip = os.path.join(MEM, _ip_nev)
+  if not os.path.exists(ip):
+      continue
+  for i, s in enumerate(io.open(ip, encoding='utf-8').read().split('\n')):
+      if not s.startswith('- '):
+          continue
+      for m in re.finditer(r'\[([^\]]+)\]\(([^)]+\.md)\)', s):
+          if m.group(2) != 'index-teljes-lapjegyzek.md':
+              continue
+          jegyzek_vizsgalt[0] += 1
+          # A `fold()` ITT MA NULLA HOZZAJARULAS -- MERVE (marci helyesbitette a sajat
+          # ekezet-javitasa TULERTEKELESET, 2026-10-06, agent_messages 9232): a 16 jelolt
+          # kozul nyersen 0 es foldolva is 0 esik a leletbe, mert a `lapjegyzékben` szoban
+          # az ekezet a TALALAT UTAN all (`lapjegyz|ékben`), tehat a nyers `in` MAR illeszkedik.
+          # A 6 -> 1-es ekezet-javitas a MASODIK agra (szo-atfedes) all, nem erre.
+          # MARAD, mert ingyen van es a hatokore nem szukul -- de NE epits ra: ha egy horog
+          # ekezetet kap a `lapjegyz` ELE, az UJ eset lesz, es akkor MERNI kell ujra.
+          if 'lapjegyz' not in fold(m.group(1)):
+              jegyzek_lelet.append((f'{_ip_nev}:{i + 1}', m.group(1)))
+
 print("  NEVEZO (amit a proba egyaltalan latott):")
 for f in FAJLOK:
     if f in vizsgalt:
         print(f"      (1) index-sor {f:34s} {vizsgalt[f]:5d}"
               + (f"   (3) szamozott bejegyzes {szam_vizsgalt.get(f,0)}" if f in szam_vizsgalt else ""))
 print(f"      (2) horog-proba: MIND A KET index sora          {horog_vizsgalt[0]:5d}")
+print(f"      (4) indexre mutato index-sor                   {jegyzek_vizsgalt[0]:5d}")
 assert sum(vizsgalt.values()) > 0 and horog_vizsgalt[0] > 0, \
     "NEVEZO NULLA: a proba nem latott bemenetet -- a LELET 0 itt NEM eredmeny"
 print(f"  mechanikus (szabaly zarja ki) ..... {mech}")
@@ -161,6 +204,10 @@ print(f"  nevesitett kivetel .............. {kizart}")
 print(f"  LELET (ket cim, egy cel) ....... {len(lelet)}")
 print(f"  LELET (horog szava nincs a lapon)  {len(horog_lelet)}")
 print(f"  LELET (egy cel, ELTERO link-szam)  {len(szam_lelet)}")
+print(f"  LELET (lap-horog, de a cel az INDEX) {len(jegyzek_lelet)}")
+for ln, cim in jegyzek_lelet:
+    print(f"      *** {ln}: a szoveg lap-horog, a cel a LAPJEGYZEK (nem a lap)")
+    print(f"            \"{cim}\"")
 for f, cel, sz in szam_lelet:
     print(f"      *** {f}: {cel} -- ket bejegyzes, ellentmondo link-szam: {', '.join(sz)}")
 for ln, cel, n, cim in horog_lelet:
@@ -170,4 +217,4 @@ for f, cel, cs in lelet:
     print(f"      *** {f}: {cel}")
     for c in cs:
         print(f"            \"{c}\"")
-sys.exit(1 if (lelet or horog_lelet or szam_lelet) else 0)
+sys.exit(1 if (lelet or horog_lelet or szam_lelet or jegyzek_lelet) else 0)

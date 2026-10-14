@@ -194,8 +194,8 @@ print(f"SOR-FAJTA: operativ(plumbing: queue-operation|attachment)={len(ids)}   "
 # viszont semmit nem tudott a masik peldanyrol. Aki ITT nyul a fuggvenyhez, nem latja, hogy van
 # meg egy -- es a dokumentalt kar epp ez: ket implementacio egy szabalyra szetcsuszik, csendben.
 # MERVE (2026-10-07): a ket fuggveny-torzs BAJTRA azonos.
-#     laura-bejovo-kontroll.py:194-230   |   auth-proba.py:255-291
-#     mindket 37 soros blokk md5-je: b7055138f90bf89ac6bbbe410b5d5950
+#     laura-bejovo-kontroll.py:209-245   |   auth-proba.py:255-291
+#     mindket 37 soros blokk md5-je: 4a74fd58d70678e9ec5e749c7feb020f (2026-10-10: a `--short=12` javitas mindket peldanyban benne van; elotte b7055138...)
 # A DUPLIKACIO TUDATOS: a ket mezonek egymastol FUGGETLENUL kell merni (mindegyik ONMAGAT,
 # `__file__`-lel), tehat nem kozos modulba kivankozo kod.
 # ES EGY MERT ESET, AMIERT NEM ELEG A FUGGVENY-TORZSET EGYUTT TARTANI: 2026-10-07-en az

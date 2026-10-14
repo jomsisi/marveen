@@ -42,7 +42,27 @@ case "$API_PATH" in /api/*) ;; *) echo "FAIL: path must start with /api/ (got: $
 [ "$#" -le 2 ] || { echo "FAIL: extra arguments -- the JSON body goes on STDIN, not in an argument." >&2; exit 1; }
 [ -r "$TOKEN_FILE" ] || { echo "FAIL: no token file at $TOKEN_FILE" >&2; exit 1; }
 
-BODY="$(cat)"
+# THE READ IS BOUNDED, AND THIS IS NOT BELT-AND-BRACES. `cat` alone blocks FOREVER when STDIN is an
+# open descriptor that never delivers and never closes -- a terminal, or an inherited socket. That is
+# not a theoretical case: on 2026-09-22 an agent lost 5h46m to exactly this. The call had no `< file`
+# redirect at all, so STDIN stayed the tool harness socket; `cat` sat in `anon_pipe_read` from 12:13
+# until it was killed by hand at 17:59, and NOTHING anywhere reported a problem.
+#
+# THE DOCUMENTED RULE DID NOT COVER IT, AND THAT IS THE POINT. Our own notes say a missing body fails
+# loudly -- true for `</dev/null`, which closes immediately and reaches the empty-body check below.
+# "No redirect at all" never reaches any check, so the LOUD failure and the SILENT hang are one
+# keystroke apart, and the silent one is what you get by forgetting rather than by doing.
+if [ -t 0 ]; then
+  echo "FAIL: STDIN is a terminal -- the JSON body must be piped in (cat <<'JSON' | ... or < file.json)." >&2
+  exit 1
+fi
+BODY="$(timeout "${DASH_API_STDIN_TIMEOUT:-10}" cat)"
+if [ $? -eq 124 ]; then
+  echo "FAIL: no body on STDIN after ${DASH_API_STDIN_TIMEOUT:-10}s -- STDIN is open but nothing is writing to it." >&2
+  echo "      The usual cause is a call with NO stdin redirect at all (the OR-fallback pattern is a" >&2
+  echo "      frequent source: the redirect gets attached to only one branch). Add the redirect." >&2
+  exit 1
+fi
 [ -n "$BODY" ] || { echo "FAIL: empty body on STDIN" >&2; exit 1; }
 
 # Validate the JSON HERE, before the server sees it: a malformed body would otherwise become a silent
@@ -57,26 +77,16 @@ fi
 # sat unnoticed across 23 memory pages and skills, and one was inside a grep pattern -- they cause
 # NO-MATCH later, not an error now, so nothing else in the pipeline can catch them. The body is still
 # sent: a cosmetic character must never block a write that is otherwise correct.
-HOMOGLYPHS="$(printf '%s' "$BODY" | python3 -c '
-import sys,re
-s=sys.stdin.read()
-# A TELJES cirill blokk (U+0400-U+04FF), NEM egy kezzel osszeszedett hasonlosag-lista.
-# MIERT: az elso valtozat 21 karaktert sorolt fel -- azokat, amiket a 2026-09-02-i takaritasban
-# TALALTAM. Ugyanaznap 12:5x-kor egy `konteneг` (U+0433) NEMAN atment rajta, mert nem volt a
-# listan. A kapu celja nem a "hasonlit-e" eldontese, hanem hogy a szo egy kesobbi grepre
-# ELOJON-E: ahhoz BARMELY cirill betu eleg egy egyebkent latin szoban.
-w=sorted({m for m in re.findall(r"\S*[\u0400-\u04FF]\S*", s)})
-# A SZO ES A KODPONT EGYUTT MEGY KI, es ez nem reszletesseg.
-# A szo megmondja, HOL keresd; a kodpont azt, MIT irj a magyarazatba. Ha csak a szot adjuk
-# vissza, a kapu ugyanabban a pillanatban a HIBAS ALAKOT teszi a kezedbe -- es a kovetkezo
-# lepes tipikusan az, hogy bemasolod a javitasrol szolo szovegbe. 2026-09-11: negy elofordulas
-# egy napon, ketto kozuluk EPP a jelensegrol szolo magyarazatban, mindketto masolassal.
-def jel(x):
-    kp = " ".join("U+%04X" % ord(c) for c in dict.fromkeys(c for c in x if "\u0400" <= c <= "\u04FF"))
-    return x + " [" + kp + "]"
-print(" ".join(jel(x) for x in w[:6]))' 2>/dev/null)"
+# A KRITERIUM 2026-10-02 ELOTT `[\u0400-\u04FF]` VOLT, vagyis CSAK CIRILL -- es egy arab
+# betu ezen NEMAN atment (marci merte ki a sajat kimeno uzeneten, msg 8549). A jelenseg
+# VEGYES IRASRENDSZERU SZO, nem "cirill tartomany": egy eset-lista pontosan az uj esetre vak.
+# A tagabb alak 2026-09-02 ota MAR allt a kimeno kapuban, es a homoglif-ellenorzes.py MAR
+# azt importalta -- csak ez a harom shell-ut maradt a szuk alakon. Egy implementacio, negy
+# fogyaszto: scripts/homoglif-jelzes.py. A stderr SZANDEKOSAN nincs elnyelve: ha a szkript
+# hianyzik, az latszodjon, kulonben a vedelem elvesztese ures kimenetnek latszik.
+HOMOGLYPHS="$(printf '%s' "$BODY" | python3 "$(dirname "${BASH_SOURCE[0]}")/homoglif-jelzes.py")"
 if [ -n "$HOMOGLYPHS" ]; then
-  echo "WARN: cyrillic homoglyph(s) in the body -- sending anyway, but these will NOT be found by a" >&2
+  echo "WARN: mixed-script VAGY LATHATATLAN (Cf) karakter(ek) in the body -- sending anyway, but these will NOT be found by a" >&2
   echo "      later grep/search: $HOMOGLYPHS" >&2
 fi
 

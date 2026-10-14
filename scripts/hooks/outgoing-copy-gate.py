@@ -423,6 +423,49 @@ def mixed_script_words(text: str):
     return out
 
 
+def invisible_format_chars(text: str):
+    """Return [(marked_word, ch, name_with_codepoint), ...] for every Cf char.
+
+    MASIK TENGELY, mint a mixed_script_words: az nem latin/nem-latin KEVEREST mer,
+    ez a LATHATATLANSAGOT. A ketto a tipikus esetben egybeesik (egy cirill `c` mindkettot
+    serti), es epp ezert nem latszott, hogy ket tengely van: 2026-10-02-en egy SOFT HYPHEN
+    atment a kapun, mert a szo "latin" maradt.
+
+    A `Cf` kategoria MAGA fedi mind a mert esetet (U+00AD SOFT HYPHEN, U+200B/C/D, U+2060,
+    U+FEFF) -- egy kulon `or ch == "\u00ad"` tag HOLT KOD lenne (az U+00AD Unicode 4.0 ota
+    Cf, nem Pd; a mienk 15.0.0). Merve marci altal 2026-10-02-en, 8599 uzeneten es 400
+    memoria-lapon:
+        Cf  ...  3 kar / 3 uzenet, es MIND A HAROM jogos (soft hyphen szo kozepen,
+                 harom kulonbozo feladotol) -> NULLA hamis pozitiv
+        Pd  ...  1227 talalat 143 lapon, ebbol 43% a memoria-index ELOIRT alakja
+                 (`- [Title](file.md) -- hook`) -> allando hamis riasztas, EZERT KIMARAD
+        Zs  ...  nulla talalat ES nulla mert kar-eset -> tudatos kihagyas, nem feledes
+    A `Pd`/`Zs` tehat nem azert nincs itt, mert nem gondoltunk ra.
+
+    A JELZES HAROM RESZE KOTELEZO (marci kikotese, a sajat kereseseböl): a karakter
+    LATHATATLAN, tehat a feladó NEM fogja megtalalni a szovegeben. Kell (a) a kodpont,
+    (b) a karakter NEVE, es (c) a kornyezet egy LATHATO jelolovel a karakter helyen.
+    """
+    import unicodedata
+    out = []
+    for i, ch in enumerate(text):
+        if unicodedata.category(ch) != "Cf":
+            continue
+        a = i
+        while a > 0 and not text[a - 1].isspace():
+            a -= 1
+        b = i + 1
+        while b < len(text) and not text[b].isspace():
+            b += 1
+        marked = text[a:i] + "[[ITT]]" + text[i + 1:b]
+        try:
+            nev = unicodedata.name(ch)
+        except ValueError:
+            nev = "UNKNOWN"
+        out.append((marked, ch, f"{nev} (U+{ord(ch):04X})"))
+    return out
+
+
 EM_DASH = "—"
 
 # GATEPERSIST816: owner-specific NAME rules load from an UNTRACKED local file,
@@ -746,6 +789,18 @@ def audit(text: str):
         problems.append(
             f"VEGYES IRASRENDSZERU SZO (homoglifa), {len(mixed)} db: {shown}{more}. "
             "Latin szoba keveredett nem-latin betu: olvasva lathatatlan, de a keresest/grepet neman eltori."
+        )
+    # MASODIK TENGELY, es NEM kap SZANDEKOS-felmentest: egy lathatatlan formazo karakter a mi
+    # szovegeinkben sosem szandekos. Ha egy lap EPP errol szol, a KODPONT-alakot irja le
+    # (`U+00AD`), es az nem tuzel -- tehat a dokumentalas nem kapcsolja ki a szabalyt.
+    invis = invisible_format_chars(prose)
+    if invis:
+        shown = "; ".join(f"{w!r} -- itt {name}" for w, _c, name in invis[:5])
+        more = f" (+{len(invis) - 5} tovabbi)" if len(invis) > 5 else ""
+        problems.append(
+            f"LATHATATLAN FORMAZO KARAKTER, {len(invis)} db: {shown}{more}. "
+            "A `[[ITT]]` jeloli a helyet. Szemre NINCS OTT, de a szo igy nem egyezik onmagaval: "
+            "egy `VISSZATERES:` sor a kulcsszo kozepen elvagva a keresonek NEM letezik."
         )
     tok_pos = accent_check_tokens(prose)
     words = [w for w, _ in tok_pos]

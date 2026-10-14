@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { join } from "node:path"
 import { readFileSync } from "node:fs"
 import { STORE_DIR, TELEGRAM_BOT_TOKEN } from "../config.js"
@@ -79,6 +79,58 @@ function runCommand(cmd: string, timeoutMs: number): { ok: boolean; detail: stri
   }
 }
 
+// Async twin of runCommand. Same contract ({ok, detail}), delivered via
+// callback instead of a return value, so the scheduler loop is NOT blocked
+// while the command runs.
+//
+// WHY THIS EXISTS (measured 2026-09-20): spawnSync blocks the Node event
+// loop for the whole run. Three command tasks POST to this same dashboard,
+// so they deadlock against their own server and are only released by the
+// timeout -- which the runner then books as a failure and reports to
+// Telegram as a red alert. Measured: memoria-tukor sat at 600s (its full
+// timeout) three days running, holding the dashboard unresponsive from
+// 08:40 to 08:50 every morning, and three false red alerts went out.
+//
+// The stdout/stderr pipes MUST be drained here: unlike spawnSync, an
+// unread pipe fills up and stalls the child.
+export function runCommandAsync(
+  cmd: string,
+  timeoutMs: number,
+  done: (r: { ok: boolean; detail: string }) => void,
+): void {
+  let settled = false
+  const finish = (r: { ok: boolean; detail: string }) => {
+    if (settled) return
+    settled = true
+    done(r)
+  }
+  try {
+    const child = spawn("bash", ["-lc", cmd], { stdio: ["ignore", "pipe", "pipe"] })
+    let err = ""
+    let timedOut = false
+    // KNOWN LIMIT, carried over from the sync path and measured 2026-09-20:
+    // this kills the direct `bash` child only, NOT its grandchildren. A
+    // timed-out task's own children (typically curl) keep running, and their
+    // output lands in the task's log AFTER the runner has already booked the
+    // run as a timeout. That is why an `OK id=<n>` line can sit under a run
+    // recorded as "timeout 30000ms". So: the log order does NOT prove what
+    // the runner saw. Anything read out of `detail` stops at this boundary.
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM") }, timeoutMs)
+    child.stdout?.on("data", () => { /* drain, the task owns its own logging */ })
+    child.stderr?.on("data", (d: Buffer) => { if (err.length < 2000) err += d.toString() })
+    child.on("error", (e: Error) => { clearTimeout(timer); finish({ ok: false, detail: e.message }) })
+    child.on("close", (code: number | null) => {
+      clearTimeout(timer)
+      if (timedOut) return finish({ ok: false, detail: `timeout ${timeoutMs}ms` })
+      if (code === 0) return finish({ ok: true, detail: "exit 0" })
+      const tail = err.trim().slice(0, 200)
+      finish({ ok: false, detail: `exit ${code}${tail ? ": " + tail : ""}` })
+    })
+  } catch (e) {
+    finish({ ok: false, detail: (e as Error).message })
+  }
+}
+
 export function runCommandTask(task: ScheduledTask, now: number): void {
   if (!task.command) {
     logger.warn({ task: task.name }, "command task has no command, skipping")
@@ -86,8 +138,40 @@ export function runCommandTask(task: ScheduledTask, now: number): void {
   }
   const timeoutMs = task.timeoutMs && task.timeoutMs > 0 ? task.timeoutMs : 10_000
   const failThreshold = task.failThreshold && task.failThreshold > 0 ? task.failThreshold : 2
+  // Wave rollout (2026-09-20): opt-in per task, so one task can be measured
+  // for a day before the rest follow. Default stays on the old sync path.
+  if (task.asyncRunner) {
+    runCommandAsync(task.command, timeoutMs, ({ ok, detail }) => {
+      // load() at completion time, not at start: the map is a module-level
+      // cache shared by every task in this process, so this hands over
+      // whatever other tasks wrote while this one was still running. It is
+      // NOT a re-read from disk -- load() returns the cached object once it
+      // exists. That is what we want here; a disk re-read would drop their
+      // in-memory updates.
+      // Date.now() (not the scheduler's `now`) because on this path the
+      // judging happens when the command finished, which may be minutes later.
+      finishCommandTask(task, load(), ok, detail, failThreshold, Date.now())
+    })
+    return
+  }
   const map = load()
   const { ok, detail } = runCommand(task.command, timeoutMs)
+  finishCommandTask(task, map, ok, detail, failThreshold, now)
+}
+
+// Everything after the command has run: health bookkeeping, the task_runs
+// row and the Telegram alert. Shared by BOTH paths on purpose -- the whole
+// point of the wave is that only the running changes, not the judging.
+// Note that appendTaskRun still fires AFTER the command completes, so the
+// slot-to-fired distance stays the measurable quantity it was before.
+function finishCommandTask(
+  task: ScheduledTask,
+  map: HealthMap,
+  ok: boolean,
+  detail: string,
+  failThreshold: number,
+  now: number,
+): void {
   const { next, action } = evaluateCommandResult(map[task.name], ok, failThreshold, now)
   map[task.name] = next
   persist()

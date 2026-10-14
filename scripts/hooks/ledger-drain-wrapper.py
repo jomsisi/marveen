@@ -176,7 +176,19 @@ def kezbesit(blokk):
         # egyezett azzal a pillanattal, amikor a burok visszaolvasott, es igy a sajat esetere
         # "nincs nyoma"-t adott. Ezert az igazolas TURELMI IDOVEL es TOBBSZOR fut.
         mid = None
-        for varakozas in (0, 2, 3):
+        # A TURELMI ABLAK 2026-10-04-IG (0,2,3) = 5 MP VOLT, ES EZ MIND A 81 ESETBEN KEVES VOLT.
+        # MERVE a sajat naplombol (2026-09-17 ota, 85 valodi talalat):
+        #   IDOTULLEPES-sel bukott .............. 87
+        #   a KOVETKEZO kor szedte ki ........... 81     <- ennyiszer volt felesleges a bukas-jeloles
+        #   VALODI ujrakuldes (duplikatum) ......  0     <- a fail-closed resz hibatlan
+        # A BUKAS es a SOR keletkezese kozti res: min 0,0 | median 0,0 | max 7,0 mp (n=81).
+        # Vagyis a sor PONTOSAN akkor jon letre, amikor a burok felad -- az 5 mp-es ablak a
+        # verseny rossz oldalan zarul be. 10 mp-es ablak a 81-bol 81-et elkapna.
+        # A FAIL-CLOSED SZEMANTIKA VALTOZATLAN: ha ezutan sem talalja, a tetel fuggoben marad.
+        # AMIT EZ JAVIT, NEM A KEZBESITES (az eddig is megtortent), HANEM A JELZES: a feladat
+        # eddig MINDEN valodi talalatnal bukottnak jelolte magat, tehat a bukas-jel nulla
+        # informaciot hordozott -- allando hamis riasztas.
+        for varakozas in (0, 2, 3, 5, 10):
             if varakozas:
                 time.sleep(varakozas)
             mid = kezbesites_igazolas(blokk, indult)

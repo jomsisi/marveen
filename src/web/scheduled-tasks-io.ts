@@ -46,6 +46,11 @@ export interface ScheduledTask {
   timeoutMs?: number
   // type='command' only: consecutive failures before a Telegram alert (default 2).
   failThreshold?: number
+  // Wave rollout (2026-09-20): when true, a type='command' task runs on the
+  // async spawn path instead of spawnSync, so it cannot block the dashboard
+  // event loop. Opt-in per task while the change is measured one task at a
+  // time; see the memoria-or-kuldes-timeoutig-tart card.
+  asyncRunner?: boolean
   // Optional pre-check script (filename relative to the task dir, or absolute path).
   // Runs via `bash` BEFORE invoking the LLM. Protocol:
   //   exit 0 + stdout "SKIP" → skip LLM this tick (nothing actionable)
@@ -104,7 +109,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = hasSkill ? readFileOr(skillPath, '') : ''
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown } } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; asyncRunner?: boolean; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown } } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -124,6 +129,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     command: config.command,
     timeoutMs: config.timeoutMs,
     failThreshold: config.failThreshold,
+    asyncRunner: config.asyncRunner,
     preCheck: config.preCheck,
     catchUpMaxAgeMinutes: parseCatchUpMaxAge(config.catchUpMaxAgeMinutes),
     stuckAfterMinutes: parseFiniteMinutes(config.stuckAfterMinutes),
@@ -168,7 +174,7 @@ export function listScheduledTasks(): ScheduledTask[] {
 
 export function writeScheduledTask(
   taskName: string,
-  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: number; stuckAfterMinutes?: number },
+  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; asyncRunner?: boolean; preCheck?: string; catchUpMaxAgeMinutes?: number; stuckAfterMinutes?: number },
 ): void {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
   mkdirSync(dir, { recursive: true })
@@ -198,6 +204,7 @@ export function writeScheduledTask(
   if (data.command !== undefined) config.command = data.command
   if (data.timeoutMs !== undefined) config.timeoutMs = data.timeoutMs
   if (data.failThreshold !== undefined) config.failThreshold = data.failThreshold
+  if (data.asyncRunner !== undefined) config.asyncRunner = data.asyncRunner
   if (data.preCheck !== undefined) config.preCheck = data.preCheck
   if (data.catchUpMaxAgeMinutes !== undefined) config.catchUpMaxAgeMinutes = data.catchUpMaxAgeMinutes
   if (data.stuckAfterMinutes !== undefined) config.stuckAfterMinutes = data.stuckAfterMinutes
