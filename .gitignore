@@ -187,6 +187,7 @@ scripts/*.py
 !scripts/auth-proba.py
 !scripts/boot-hook-prune.py
 !scripts/gdocs.py
+!scripts/homoglif-ellenorzes.py
 !scripts/intel_db.py
 !scripts/laura-bejovo-kontroll.py
 !scripts/memory-link-audit.py
