@@ -331,7 +331,12 @@ OLD_VERSION_FULL=$(git rev-parse HEAD 2>/dev/null || echo "")
 # actionably instead of dying silently under set -e (the dominant failure).
 RESULT_PHASE="pull"
 AHEAD=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
-if [ "${AHEAD:-0}" -gt 0 ]; then
+# Local-only commits with NOTHING new upstream are not a conflict: the ff-only pull
+# below is a no-op then. Refuse only on a real divergence (ahead AND behind).
+# (Measured 2026-10-23: ahead 2 / behind 0 failed the weekly auto-update for no reason.)
+git fetch -q origin "$CURRENT_BRANCH" 2>/dev/null || true
+BEHIND=$(git rev-list --count 'HEAD..@{u}' 2>/dev/null || echo 0)
+if [ "${AHEAD:-0}" -gt 0 ] && [ "${BEHIND:-0}" -gt 0 ]; then
   RESULT_MSG="A helyi checkout ${AHEAD} committal elore van az upstreamhez kepest; a fast-forward frissites nem lehetseges. Nezd meg: git log @{u}..HEAD"
   echo -e "${RED}HIBA:${NC} a helyi checkout ${AHEAD} committal elore van az upstreamhez kepest; fast-forward nem lehetseges. Nezd: git log @{u}..HEAD"
   restore_stash_before_exit

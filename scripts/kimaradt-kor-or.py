@@ -103,6 +103,24 @@ def main():
             for nev, db_, elso, _ in egyszeri:
                 print(f'       {elso}  {nev}')
     print('\nA `fired` az UTEMEZO sikere, nem a vegrehajtase. Ezek a korok NEM futottak le.')
+    # A 3 napos ablak miatt ugyanaz a szunet harom napig ujra megjelenne, es minden futas
+    # exit 1-et adna (2026-10-23: 18 egymas utani riasztas). Csak a MAR NEM JELENTETT szunet
+    # esemeny; a regi allapot, kiirodik, de nem buktat.
+    allapot_ut = os.path.join(GYOKER, 'store', 'kimaradt-kor-or.jelentett.json')
+    try:
+        latott = set(json.load(open(allapot_ut)))
+    except Exception:
+        latott = set()
+    kulcsok = {int(A.timestamp()) for A, _, _, _ in talalat}
+    uj = kulcsok - latott
+    try:
+        json.dump(sorted(latott | kulcsok), open(allapot_ut, 'w'))
+    except Exception as e:
+        print(f'FIGYELEM: az allapotfajl nem irhato ({e}) -- minden szunet ujnak szamit')
+        return 1
+    if not uj:
+        print('Mind a(z) %d szunetet mar jelentettem korabban: allapot, nem uj esemeny.' % len(kulcsok))
+        return 0
     return 1
 
 

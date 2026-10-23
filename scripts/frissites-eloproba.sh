@@ -40,7 +40,13 @@ ELORE="$(git rev-list --count "@{u}..HEAD" 2>/dev/null || echo '?')"
 if [ "$ELORE" = '?' ]; then
   HIBA+=("az @{u}..HEAD nem merheto (nincs upstream?)")
 elif [ "$ELORE" != "0" ]; then
-  HIBA+=("a helyi checkout $ELORE committal ELORE jar -- a --ff-only pull EL FOG BUKNI. Nezd: git log @{u}..HEAD")
+  # Since 2026-10-23 update.sh refuses only a real divergence (ahead AND behind);
+  # ahead with nothing new upstream makes the ff-only pull a no-op.
+  HATRA="$(git rev-list --count "HEAD..@{u}" 2>/dev/null || echo 1)"
+  [ -n "${ELOPROBA_BEHIND_OVERRIDE:-}" ] && HATRA="$ELOPROBA_BEHIND_OVERRIDE"
+  if [ "$HATRA" != "0" ]; then
+    HIBA+=("a helyi checkout $ELORE committal ELORE jar es az upstreamen $HATRA ujabb commit van -- a --ff-only pull EL FOG BUKNI. Nezd: git log @{u}..HEAD")
+  fi
 fi
 
 ALLAPOT=ok; [ ${#HIBA[@]} -gt 0 ] && ALLAPOT=HIBA
