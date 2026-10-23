@@ -1309,7 +1309,13 @@ function sendPendingRetryAlertBatch(
     `[${BOT_NAME} scheduler] A(z) "${agentName}" ágens ${summary.count} ütemezett feladata EGYSZERRE áll, a legrégebbi ${oldestMinutes} perce. Ez nem egy késő feladat, hanem az ágens ütemezett kézbesítése.`,
     diagnosis,
     `Feladatok: ${summary.taskNames.join(', ')}.`,
-    'A rendszer tovább próbálkozik, de magától NEM fog megoldódni, ha a fenti ok áll fenn. A következő összevont jelzés legkorábban egy óra múlva megy.',
+    // NOT "the next summary goes in an hour": the throttle only delays, it
+    // does not schedule. A row spends its stamp whether or not its message
+    // went out, so once every stuck row has alerted, nothing re-escalates --
+    // the next message needs a FURTHER row whose threshold lands after the
+    // window. Promising a repeat the code does not deliver is worse than
+    // saying nothing: the operator would wait for it.
+    'A rendszer tovább próbálkozik, de magától NEM fog megoldódni, ha a fenti ok áll fenn. Újabb összevont jelzés csak akkor megy, ha egy további feladat küszöbe az ablak letelte után ér be (tipikusan egy később beálló feladat). Ha nem áll be újabb, ez az utolsó üzenet erről.',
   ].join('\n')
 
   // Mark the window BEFORE the async send, for the same reason the row stamp

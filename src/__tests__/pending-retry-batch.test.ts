@@ -269,6 +269,21 @@ describe('schedule runner: staggered rows still produce ONE message', () => {
     expect(claimedRows.size).toBe(1)
   })
 
+  it('does not promise a repeat the code cannot deliver', async () => {
+    // The throttle delays a message, it does not schedule one. A stuck row
+    // spends its stamp whether or not its message went out, so once every
+    // stuck row has alerted nothing re-escalates. A closing line that said
+    // "the next summary goes in an hour" would have the operator waiting for
+    // a message that never comes -- the exact failure this whole change is
+    // about, one layer up.
+    mockListPendingRetries.mockReturnValue([row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)])
+    await runTicksFor(2 * 60_000)
+
+    const text = String(mockSendMessage.mock.calls[0][2])
+    expect(text).not.toMatch(/legkorábban|egy óra múlva/)
+    expect(text).toContain('Ha nem áll be újabb, ez az utolsó üzenet erről.')
+  })
+
   it('does not repeat itself as the remaining rows come due inside the window', async () => {
     mockListPendingRetries.mockReturnValue([row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)])
     // 25 minutes of ticks: the 51- and 41-minute rows cross 60 too.
