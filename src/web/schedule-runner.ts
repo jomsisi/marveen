@@ -22,7 +22,7 @@ import {
   clearPendingTaskRetryAlert,
   markScheduledTaskKanbanWaiting,
 } from '../db.js'
-import { toPendingRetryView, classifySendError, summarizePendingRetryBatch, shouldSendBatchAlert, type PendingRetryView } from '../pending-retries.js'
+import { toPendingRetryView, classifySendError, summarizePendingRetryBatch, shouldSendBatchAlert, BATCH_REPEAT_INTERVAL_MS, type PendingRetryView } from '../pending-retries.js'
 import {
   SCHEDULED_TASK_PREAMBLE,
   wrapScheduledTask,
@@ -1254,28 +1254,54 @@ function sendPendingRetryAlertBatch(
   session: string,
   nowMs: number,
 ): void {
-  if (due.length === 0) return
-  const agentName = due[0].agentName
+  // The agent comes from the STUCK group, not from `due`. `due` is empty on
+  // most ticks of a long outage -- every row's alert_sent_at is already set,
+  // so nothing is "due" any more -- and an early return on that would make
+  // the two-hour repeat unreachable in production while a test whose mock
+  // does not write alert_sent_at back stays green. (It did; that is how this
+  // was found.)
+  if (stuck.length === 0) return
+  const agentName = stuck[0].agentName
 
   // One stuck task is a late task, not an outage: keep the existing per-task
-  // text, which carries the mcp-missing / first-run branches verbatim.
-  if (stuck.length <= 1) { sendPendingRetryAlert(due[0], nowMs); return }
+  // text, which carries the mcp-missing / first-run branches verbatim. With
+  // no due row there is nothing to say about it on this tick.
+  if (stuck.length <= 1) {
+    if (due.length > 0) sendPendingRetryAlert(due[0], nowMs)
+    return
+  }
 
   // Stamp the DUE rows first, same race guard as the single path. A row
   // another tick already alerted on returns false and is not reported twice.
   const claimed = due.filter(v => markPendingTaskRetryAlert(v.taskName, v.agentName, nowMs))
-  if (claimed.length === 0) return
 
-  // Per-agent rate limit. The stamps above stay consumed even when the
-  // message is suppressed, and that is the intent: the earlier message
-  // counted every STUCK row, including these, so their information was
-  // already delivered. Leaving a stamp unset would re-enter this path every
-  // 60 seconds -- the same spin the config-error branches below avoid.
-  if (!shouldSendBatchAlert(nowMs, lastBatchAlertAt.get(agentName) ?? null)) {
-    logger.info(
-      { agent: agentName, claimed: claimed.map(v => v.taskName), stuck: stuck.length, provider: CHANNEL_PROVIDER },
-      'Pending-retry batch alert throttled: this agent was already reported within the threshold window',
-    )
+  // TWO different gates, because the first message and the repeat answer
+  // different questions.
+  //
+  // FIRST message: a row must have crossed the 60-minute threshold on this
+  // tick (`claimed`). Without that the agent has not waited long enough.
+  //
+  // REPEAT: time only, every BATCH_REPEAT_INTERVAL_MS while rows are still
+  // stuck, independent of the row stamps. The stamps are one-shot by design,
+  // so an agent whose every row has alerted would otherwise go quiet while
+  // still dead -- the 2026-10-23 failure again, later in the timeline
+  // (Zsolt's decision 2026-10-23: repeat every two hours).
+  //
+  // Claimed stamps stay consumed even when the message is suppressed: the
+  // earlier message counted every STUCK row including these, so their
+  // information was already delivered, and leaving a stamp unset would
+  // re-enter this path every 60 seconds -- the same spin the config-error
+  // branches below avoid.
+  const lastSent = lastBatchAlertAt.get(agentName) ?? null
+  if (lastSent == null) {
+    if (claimed.length === 0) return
+  } else if (!shouldSendBatchAlert(nowMs, lastSent, BATCH_REPEAT_INTERVAL_MS)) {
+    if (claimed.length > 0) {
+      logger.info(
+        { agent: agentName, claimed: claimed.map(v => v.taskName), stuck: stuck.length, provider: CHANNEL_PROVIDER },
+        'Pending-retry batch alert throttled: this agent was already reported, repeat not due yet',
+      )
+    }
     return
   }
 
@@ -1309,13 +1335,13 @@ function sendPendingRetryAlertBatch(
     `[${BOT_NAME} scheduler] A(z) "${agentName}" ágens ${summary.count} ütemezett feladata EGYSZERRE áll, a legrégebbi ${oldestMinutes} perce. Ez nem egy késő feladat, hanem az ágens ütemezett kézbesítése.`,
     diagnosis,
     `Feladatok: ${summary.taskNames.join(', ')}.`,
-    // NOT "the next summary goes in an hour": the throttle only delays, it
-    // does not schedule. A row spends its stamp whether or not its message
-    // went out, so once every stuck row has alerted, nothing re-escalates --
-    // the next message needs a FURTHER row whose threshold lands after the
-    // window. Promising a repeat the code does not deliver is worse than
-    // saying nothing: the operator would wait for it.
-    'A rendszer tovább próbálkozik, de magától NEM fog megoldódni, ha a fenti ok áll fenn. Újabb összevont jelzés csak akkor megy, ha egy további feladat küszöbe az ablak letelte után ér be (tipikusan egy később beálló feladat). Ha nem áll be újabb, ez az utolsó üzenet erről.',
+    // The promise is back ONLY because the code now keeps it: the repeat is
+    // agent-level and time-based (BATCH_REPEAT_INTERVAL_MS), so it no longer
+    // depends on a row stamp that can be spent only once. If that mechanism
+    // is ever removed, this sentence goes with it -- a closing line that
+    // promises a repeat nobody sends is exactly how the 2026-10-23 messages
+    // read, and the operator waits for it instead of acting.
+    'A rendszer tovább próbálkozik, de magától NEM fog megoldódni, ha a fenti ok áll fenn. Újabb jelzés 2 órán belül nem jön; ha az ok megmarad, 2 óránként megismétlem, amíg a feladatok állnak.',
   ].join('\n')
 
   // Mark the window BEFORE the async send, for the same reason the row stamp
@@ -1639,13 +1665,24 @@ export function startScheduleRunner(): NodeJS.Timeout {
       }
     }
 
-    for (const [agentName, due] of alertsDueByAgent) {
+    // Iterate the STUCK agents, not only the ones with a due row: the repeat
+    // is time-based, so an agent whose every row has already alerted must
+    // still be considered on later ticks.
+    for (const [agentName, stuck] of stuckByAgent) {
       sendPendingRetryAlertBatch(
-        due,
-        stuckByAgent.get(agentName) ?? due,
+        alertsDueByAgent.get(agentName) ?? [],
+        stuck,
         sessionByAgent.get(agentName) ?? `agent-${agentName}`,
         now,
       )
+    }
+
+    // An agent whose queue drained is no longer stuck, so its repeat window
+    // goes with it. Otherwise the FIRST message of its NEXT outage would be
+    // measured against an hours-old timestamp and silently throttled -- and
+    // the one thing this alert may not do is miss the first report.
+    for (const agentName of [...lastBatchAlertAt.keys()]) {
+      if (!stuckByAgent.has(agentName)) lastBatchAlertAt.delete(agentName)
     }
 
     // Fire in injection-priority order, not directory order: with several

@@ -30,6 +30,24 @@
 export const ALERT_THRESHOLD_MS = 60 * 60 * 1000
 
 /**
+ * How often an agent that is STILL stuck is escalated again, once its first
+ * aggregated message has gone out (Zsolt's decision, 2026-10-23).
+ *
+ * A SEPARATE constant, not a reuse of ALERT_THRESHOLD_MS, because the two
+ * answer different questions: the threshold above decides when a WAIT becomes
+ * worth reporting, this one decides how often an unresolved OUTAGE is
+ * repeated. Tying them together would mean a later tuning of either silently
+ * moves the other.
+ *
+ * Why a repeat is needed at all: the per-row stamp is one-shot and the
+ * per-agent throttle only delays, so once every stuck row has alerted, an
+ * agent that stays stuck goes quiet -- which is the 2026-10-23 failure again,
+ * just later in the timeline. The repeat is therefore AGENT-level and
+ * time-based: it does not re-arm any row stamp.
+ */
+export const BATCH_REPEAT_INTERVAL_MS = 2 * 60 * 60 * 1000
+
+/**
  * Decide whether the alerting layer should fire a Telegram notification
  * for a pending retry row.
  *

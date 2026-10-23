@@ -85,10 +85,17 @@ const mockReady = vi.fn(() => false)
 // this suite is about -- the runner ticks several times inside the test
 // window, and with an always-true stamp every tick would re-alert.
 const claimedRows = new Set<string>()
-const mockMarkAlert = vi.fn((taskName: unknown, agentName: unknown) => {
-  const key = `${String(taskName)}@${String(agentName)}`
+const mockMarkAlert = vi.fn((taskName: string, agentName: string, ts: number) => {
+  const key = `${taskName}@${agentName}`
   if (claimedRows.has(key)) return false
   claimedRows.add(key)
+  // Mirror the real UPDATE: the stamp lands ON THE ROW, so the next tick's
+  // toPendingRetryView sees alertDue=false. A mock that only remembered the
+  // key kept every row "due" forever and hid an early return that made the
+  // two-hour repeat unreachable in production.
+  for (const r of mockListPendingRetries() as Array<Record<string, unknown>>) {
+    if (r.task_name === taskName && r.agent_name === agentName) r.alert_sent_at = ts
+  }
   return true
 })
 
@@ -102,7 +109,7 @@ vi.mock('../db.js', () => ({
   deletePendingTaskRetry: vi.fn(),
   updatePendingTaskRetry: vi.fn(() => true),
   insertPendingTaskRetryIfNew: vi.fn(),
-  markPendingTaskRetryAlert: (taskName: string, agentName: string, _ts: number) => mockMarkAlert(taskName, agentName),
+  markPendingTaskRetryAlert: (taskName: string, agentName: string, ts: number) => mockMarkAlert(taskName, agentName, ts),
   clearPendingTaskRetryAlert: vi.fn(),
   markScheduledTaskKanbanWaiting: vi.fn(),
 }))
@@ -269,19 +276,18 @@ describe('schedule runner: staggered rows still produce ONE message', () => {
     expect(claimedRows.size).toBe(1)
   })
 
-  it('does not promise a repeat the code cannot deliver', async () => {
-    // The throttle delays a message, it does not schedule one. A stuck row
-    // spends its stamp whether or not its message went out, so once every
-    // stuck row has alerted nothing re-escalates. A closing line that said
-    // "the next summary goes in an hour" would have the operator waiting for
-    // a message that never comes -- the exact failure this whole change is
-    // about, one layer up.
+  it('promises exactly the repeat the code keeps', async () => {
+    // The closing line may name an interval only because the repeat is now
+    // agent-level and time-based, so it does not depend on a row stamp that
+    // can be spent once. It must not claim the 60-minute threshold: that one
+    // governs the FIRST message, and an operator told "an hour" would start
+    // waiting at the wrong time.
     mockListPendingRetries.mockReturnValue([row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)])
     await runTicksFor(2 * 60_000)
 
     const text = String(mockSendMessage.mock.calls[0][2])
-    expect(text).not.toMatch(/legkorábban|egy óra múlva/)
-    expect(text).toContain('Ha nem áll be újabb, ez az utolsó üzenet erről.')
+    expect(text).toContain('2 óránként megismétlem')
+    expect(text).not.toMatch(/egy óra múlva|60 perc/)
   })
 
   it('does not repeat itself as the remaining rows come due inside the window', async () => {
@@ -295,12 +301,78 @@ describe('schedule runner: staggered rows still produce ONE message', () => {
     expect(mockSendMessage).toHaveBeenCalledTimes(1)
   })
 
-  it('speaks again for a task that JOINS the queue after the window', async () => {
-    // A row cannot become due later than (its first_attempt + threshold), so
-    // a second message needs a task that ENTERS the queue later -- which is
-    // what happened on 2026-10-23: the 18:00 alert's row was first attempted
-    // at 17:00, hours after the first ones. The queue is re-read every tick,
-    // so the fixture grows with the clock.
+  // --- The two-hour repeat (Zsolt's decision, 2026-10-23) ---
+  //
+  // Why 119/125 and not 119/121: the first message goes out on the runner's
+  // FIRST tick, at +61s, so the repeat window opens at ~121 minutes of run
+  // time. Pinning 121 would make the assertion depend on the tick phase, not
+  // on the interval -- a test that passes or fails by a second is not
+  // measuring the thing it names.
+
+  it('stays quiet for two hours after the first message', async () => {
+    mockListPendingRetries.mockReturnValue([row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)])
+    await runTicksFor(119 * 60_000)
+    expect(mockSendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('repeats once the two hours have passed, while the rows are still stuck', async () => {
+    mockListPendingRetries.mockReturnValue([row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)])
+    await runTicksFor(125 * 60_000)
+
+    expect(mockSendMessage).toHaveBeenCalledTimes(2)
+    // The repeat is NOT driven by row stamps -- all three were spent in the
+    // first hour -- and it reports the same stuck group, aged further.
+    expect(claimedRows.size).toBe(3)
+    const second = String(mockSendMessage.mock.calls[1][2])
+    expect(second).toContain('3 ütemezett feladata EGYSZERRE áll')
+    expect(second).toContain('2 óránként megismétlem')
+  })
+
+  it('goes quiet when the queue drains -- a resolved outage is not repeated', async () => {
+    const t0 = Date.now()
+    const rows = [row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)]
+    // The tasks finally run at +150 minutes: from then on nothing is stuck.
+    mockListPendingRetries.mockImplementation(() => (Date.now() >= t0 + 150 * 60_000 ? [] : [...rows]))
+    await runTicksFor(300 * 60_000)
+
+    // First message, then the one repeat at ~121 -- and nothing after the
+    // queue emptied, although another five repeat windows went by.
+    expect(mockSendMessage).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not throttle the FIRST message of the next outage', async () => {
+    // The discriminating case for clearing the repeat window on drain. The
+    // new outage's first message falls 99 minutes after the last pre-drain
+    // message -- inside the two-hour interval. If the window survived the
+    // drain, this report would be silently throttled, and missing the FIRST
+    // report is the one failure this alert may not have.
+    const t0 = Date.now()
+    const first = [row(TASKS[0], 61), row(TASKS[1], 51)]
+    const later = [
+      { ...row(TASKS[2], 0), task_name: 'kupon-szamla-figyeles', first_attempt: t0 + 160 * 60_000 },
+      { ...row(TASKS[2], 0), task_name: 'mvm-szamla-tovabbitas', first_attempt: t0 + 160 * 60_000 },
+    ]
+    mockListPendingRetries.mockImplementation(() => {
+      const now = Date.now()
+      if (now >= t0 + 160 * 60_000) return [...later]
+      if (now >= t0 + 150 * 60_000) return []
+      return [...first]
+    })
+    mockListScheduledTasks.mockReturnValue(
+      [...TASKS, 'kupon-szamla-figyeles', 'mvm-szamla-tovabbitas'].map(task),
+    )
+    await runTicksFor(230 * 60_000)
+
+    // first message (~1), repeat (~121), then the NEW outage's first (~220).
+    expect(mockSendMessage).toHaveBeenCalledTimes(3)
+    expect(String(mockSendMessage.mock.calls[2][2])).toContain('2 ütemezett feladata EGYSZERRE áll')
+  })
+
+  it('counts a task that JOINS the queue in the next repeat', async () => {
+    // The queue is re-read every tick, so a task that enters later (on
+    // 2026-10-23 the 18:00 alert's row was first attempted at 17:00) is part
+    // of the stuck group from then on, and the next repeat counts it. The
+    // second message here is the two-hour repeat, not a second first-message.
     // Build the rows ONCE: `row()` reads Date.now(), so composing them inside
     // the implementation would re-stamp first_attempt on every tick and the
     // ages would never grow -- a fixture that quietly freezes the clock.
