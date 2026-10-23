@@ -53,6 +53,48 @@ export function shouldSendAlert(
   return now - firstAttempt > thresholdMs
 }
 
+/** What an aggregated escalation says about one agent's stuck rows. */
+export interface PendingRetryBatchSummary {
+  agentName: string
+  taskNames: string[]
+  count: number
+  /** Age of the OLDEST row, in whole minutes. */
+  oldestMinutes: number
+  /** Distinct reason KINDS, `mcp-missing:<server>` collapsed to its kind. */
+  reasons: string[]
+  /** The single reason kind when every row shares one, else null. */
+  commonReason: string | null
+}
+
+/**
+ * Summarize a group of due retry rows for ONE agent.
+ *
+ * Why this is a decision and not formatting: the per-row alert already
+ * worked -- on 2026-10-23 it sent ten messages, one per stuck task, each at
+ * 60 minutes, and nine hours passed with no action. What none of the ten
+ * said was that every scheduled task on that agent was stuck behind ONE
+ * cause. `commonReason` is that sentence's subject: one distinct kind means
+ * one fix, several means the agent is down in more than one way and the
+ * operator needs the list.
+ *
+ * Reason kinds are split on ':' so `mcp-missing:foo` and `mcp-missing:bar`
+ * count as one cause -- the fix (restart the MCP) is the same.
+ */
+export function summarizePendingRetryBatch(
+  views: Array<{ taskName: string, agentName: string, ageMs: number, lastReason: string | null }>,
+): PendingRetryBatchSummary | null {
+  if (views.length === 0) return null
+  const reasons = [...new Set(views.map(v => (v.lastReason ?? 'busy').split(':')[0]))]
+  return {
+    agentName: views[0].agentName,
+    taskNames: views.map(v => v.taskName),
+    count: views.length,
+    oldestMinutes: Math.max(...views.map(v => Math.floor(v.ageMs / 60000))),
+    reasons,
+    commonReason: reasons.length === 1 ? reasons[0] : null,
+  }
+}
+
 /**
  * Classify a channel send failure as transient (worth retrying) or
  * permanent (a config / client error that will fail identically every

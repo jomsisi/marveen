@@ -77,6 +77,65 @@ export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 // `← for agents` is the FleetView tail on current builds; older tails kept.
 const IDLE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\)| · [^\n]*?(?:ctrl\+t|↓ to manage|← for agents))|\? for shortcuts/
 
+// THE REQUIRED TAIL IS ITSELF AN ENUMERATION, AND IT RAN OUT ON 2026-10-23.
+// With a background shell running, Claude Code 2.1.309 renders the footer as
+// `⏵⏵ bypass permissions on · 1 shell` -- the `·` separated action list is
+// there, but the `ctrl+t` / `↓ to manage` / `← for agents` chrome is NOT. The
+// strict pattern above therefore read the pane as footer-less, detectPaneState
+// returned 'unknown', and ten of the main agent's scheduled tasks sat in
+// pending_task_retries from 09:30 to 18:53 (20 462 retry log lines) while the
+// session was in fact idle.
+//
+// This is the SAME failure the comment above describes for the mode prefix,
+// moved one field to the right: whatever tail list we write today, the next
+// Claude Code build adds a footer action and the hole reopens. So the
+// anti-false-positive work moves off the tail and onto POSITION -- the idiom
+// detectsThinkingBlockError already used: the live footer is the LAST
+// non-empty line of the pane, which prose quoted in scrollback cannot be.
+//
+// Capture group on purpose: detectPermissionMode reads the mode prefix from
+// THIS literal, so the tail-less shape cannot drift between the two readers
+// the way the strict shape did (see the sync test in
+// src/__tests__/pane-footer-tailless.test.ts).
+const IDLE_FOOTER_TAILLESS_RX = /((?:[A-Za-z][\w-]* ){1,3})on · \S/
+
+/**
+ * Index of the live idle footer line, or -1. The single place that decides
+ * what counts as a footer and WHICH line is the live one.
+ *
+ * Two shapes, deliberately asymmetric:
+ *   - tail-less (`... on · 1 shell`): accepted ONLY as the last non-empty
+ *     line, because without the chrome tail the string is weak enough to
+ *     appear in prose.
+ *   - strict (carries the tail): accepted anywhere, but resolved from the
+ *     BOTTOM. detectPaneState and liveInputBox used Array.findIndex here,
+ *     i.e. top-down, so a footer-looking line quoted in scrollback won the
+ *     anchor and the input-box scan then ran above the live box: a pane
+ *     holding unsubmitted text read 'idle' instead of 'typing' and the
+ *     scheduler delivered on top of it (measured 2026-10-23 on a real
+ *     capture-pane dump, before the tail-less shape was added at all).
+ */
+export function idleFooterIndex(pane: string): number {
+  if (!pane) return -1
+  const lines = pane.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].trim()) continue
+    if (IDLE_FOOTER_TAILLESS_RX.test(lines[i])) return i
+    break
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (IDLE_FOOTER_RX.test(lines[i])) return i
+  }
+  return -1
+}
+
+/** Whether the pane shows a live idle footer. Superset of the old
+ *  whole-pane IDLE_FOOTER_RX test: nothing that matched before stops
+ *  matching, the tail-less shape is added on the last non-empty line. */
+export function hasIdleFooter(pane: string): boolean {
+  return idleFooterIndex(pane) >= 0
+}
+
 // Positive busy signals. ANY match anywhere in the pane means the turn
 // is mid-flight, even if the footer looks idle for a frame.
 //
@@ -440,12 +499,9 @@ const ERROR_BLOCK_LINES = 4
 export function detectsThinkingBlockError(pane: string): boolean {
   if (!pane) return false
   const lines = pane.split('\n')
-  // Find the footer from the bottom: the live footer is the last line of
-  // the pane, so a footer-looking line quoted in scrollback must not win.
-  let footerIdx = -1
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (IDLE_FOOTER_RX.test(lines[i])) { footerIdx = i; break }
-  }
+  // Footer resolved by the shared helper (bottom-up, see idleFooterIndex):
+  // a footer-looking line quoted in scrollback must not win the anchor.
+  const footerIdx = idleFooterIndex(pane)
   if (footerIdx < 0) return false
   const start = Math.max(0, footerIdx - ERROR_LIVE_TAIL_LINES)
   const tail = lines.slice(start, footerIdx)
@@ -505,7 +561,7 @@ export function detectsBlockingMenu(pane: string): boolean {
   const lines = pane.split('\n')
   const footerRegion = lines.slice(-MENU_FOOTER_REGION_LINES).join('\n')
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(pane)) return false
   return MENU_NAV_RX.test(footerRegion) || MENU_ESC_RX.test(footerRegion)
 }
 
@@ -637,7 +693,7 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
   }
   const footerRegion = lines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
-  if (IDLE_FOOTER_RX.test(pane)) return null
+  if (hasIdleFooter(pane)) return null
   for (const g of FIRST_RUN_GATES) {
     if (!g.rx.test(pane)) continue
     // The welcome banner also heads the NORMAL fresh-session layout (logo +
@@ -686,7 +742,7 @@ export function detectsModelConsentDialog(pane: string): boolean {
   }
   const footerRegion = lines.slice(-LIVE_FOOTER_REGION_LINES).join('\n')
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(pane)) return false
   return MODEL_CONSENT_TITLE_RX.test(pane)
     && MODEL_CONSENT_CONTINUE_RX.test(pane)
     && MODEL_CONSENT_CONFIRM_RX.test(footerRegion)
@@ -816,6 +872,16 @@ export function detectPermissionMode(pane: string): string | null {
     /((?:[A-Za-z][\w-]* ){1,3})on(?: \(shift\+tab to cycle\)| · [^\n]*?(?:ctrl\+t|↓ to manage|← for agents))/,
   )
   if (m) return m[1].trim()
+  // Tail-less footer (`... on · 1 shell`): same literal the footer resolver
+  // uses, and same position rule -- only the last non-empty line qualifies.
+  // Without this the dashboard showed NO permission mode for every pane with
+  // a background shell, which is exactly the field that exists to surface an
+  // ask-first mode (the 2026-07-27 incident above).
+  const idx = idleFooterIndex(pane)
+  if (idx >= 0) {
+    const tailless = pane.split('\n')[idx]?.match(IDLE_FOOTER_TAILLESS_RX)
+    if (tailless) return tailless[1].trim()
+  }
   return /\? for shortcuts/.test(pane) ? 'default' : null
 }
 
@@ -853,7 +919,7 @@ export function detectPaneState(
   // defer rather than pile a second prompt on.
   if (detectsPastePlaceholder(pane)) return 'busy'
 
-  if (!IDLE_FOOTER_RX.test(pane)) {
+  if (!hasIdleFooter(pane)) {
     // Footer-less fresh-session / welcome-screen: a PARKED \u276F input box still
     // means the agent has a delivered message waiting to submit. Classify it
     // 'typing' (not 'unknown') so the stuck-input recovery stack can see and
@@ -872,7 +938,7 @@ export function detectPaneState(
   // Scan UPWARDS from the footer so we stay inside the live box and
   // don't pick up historical ❯ lines from scrollback.
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(pane)
   if (footerIdx >= 0) {
     let bottomSep = -1
     for (let i = footerIdx - 1; i >= 0; i--) {
@@ -973,7 +1039,7 @@ function liveInputBoxFooterless(lines: string[]): string | null {
 
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(pane)
   if (footerIdx < 0) return liveInputBoxFooterless(lines)
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
@@ -1086,8 +1152,13 @@ export function shouldRetrySubmit(
   if (detectsPastePlaceholder(pane)) return true
 
   // Without an idle footer the pane is either not Claude Code or in an
-  // unknown render state. Be conservative and skip.
-  if (!IDLE_FOOTER_RX.test(pane)) return false
+  // unknown render state. Be conservative and skip. hasIdleFooter (not the
+  // strict pattern) because this is the SAME loss as the one above: on a
+  // tail-less footer the resubmit was suppressed too, so a message genuinely
+  // parked in the box of a session with a background shell would never be
+  // re-sent. This is the only widened site that ACTS (a keystroke) rather
+  // than merely classifying -- the hint/min-chars guards below still apply.
+  if (!hasIdleFooter(pane)) return false
 
   const inputBox = liveInputBox(pane)
   if (inputBox == null) return false

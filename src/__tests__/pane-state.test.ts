@@ -493,30 +493,57 @@ describe('detectPaneState', () => {
     expect(detectPaneState(IDLE_BACKGROUND_ONE_SHELL_HIDDEN)).toBe('idle')
   })
 
-  it('does NOT classify a truncated "· N shell" prefix as idle', () => {
-    // Defense in depth: the shells-variant requires either the
-    // "· N shells · ctrl+t" marker or the "· N shells · ↓ to manage"
-    // marker, not just the bare "· N shell(s)" prefix. Two reasons we
-    // pin this down with an explicit negative test:
-    //   1. A malformed or partially rendered footer (terminal
-    //      corruption, mid-render frame) must classify as 'unknown'
-    //      so we do not deliver a prompt into a pane that is not
-    //      really ready.
-    //   2. The "bypass permissions on · 1 shell" substring could
-    //      appear in scrollback as quoted log output or an echoed
-    //      message, and the regex must not be tricked into treating
-    //      that as a live footer.
-    // The fixture is deliberately minimal: no other idle markers
-    // (no "(shift+tab to cycle)", no "? for shortcuts") so the
-    // assertion isolates the truncated-shells path specifically.
-    const truncated = [
+  // AMENDED 2026-10-23. This case used to assert 'unknown' for the bare
+  // "· 1 shell" footer, on two stated grounds. Ground 2 (a quoted substring
+  // in scrollback must not pass) STANDS and is kept below. Ground 1 -- that
+  // the bare prefix means a malformed or mid-render frame -- turned out to be
+  // factually wrong for this shape: on Claude Code 2.1.309, a session with
+  // exactly ONE background shell renders
+  //     ⏵⏵ bypass permissions on · 1 shell
+  // as its COMPLETE, STABLE footer -- no chrome tail at all. Measured
+  // first-hand on a live agent session, three consecutive capture-pane reads
+  // byte-identical, while the session was demonstrably accepting prompts.
+  // A mid-render frame does not survive 20 462 scheduler retries across nine
+  // hours, which is what this misclassification cost on 2026-10-23.
+  // The guard therefore moved from the TAIL to the POSITION: the tail-less
+  // shape counts only on the pane's last non-empty line (idleFooterIndex).
+  it('classifies the tail-less "· N shell" footer as idle (2.1.309 shape)', () => {
+    const live = [
       '',
       SEP,
       '❯ ',
       SEP,
       '  ⏵⏵ bypass permissions on · 1 shell',
     ].join('\n')
-    expect(detectPaneState(truncated)).toBe('unknown')
+    expect(detectPaneState(live)).toBe('idle')
+  })
+
+  it('still does NOT classify a genuinely malformed footer as idle', () => {
+    // Ground 1, kept where it is still true: a separator with nothing after
+    // it, or a cut-off mode phrase, is a partial render and must stay
+    // 'unknown' so no prompt is delivered into a pane that is not ready.
+    for (const footer of [
+      '  ⏵⏵ bypass permissions on ·',
+      '  ⏵⏵ bypass permissions on · ',
+      '  ⏵⏵ bypass permissions o',
+      '  ⏵⏵ bypass permissions',
+    ]) {
+      const malformed = ['', SEP, '❯ ', SEP, footer].join('\n')
+      expect(detectPaneState(malformed)).toBe('unknown')
+    }
+  })
+
+  it('still does NOT treat a quoted footer line in scrollback as live', () => {
+    // Ground 2, unchanged in substance: the string can appear as quoted log
+    // output or an echoed message. Without a live footer below it the pane
+    // has none, and the position rule is what rejects it.
+    const quoted = [
+      'Reading the scheduler log:',
+      '  ⏵⏵ bypass permissions on · 1 shell',
+      'That line was on the footer while the tasks piled up.',
+      '',
+    ].join('\n')
+    expect(detectPaneState(quoted)).toBe('unknown')
   })
 
   it('detects busy when "esc to interrupt" footer marker is present', () => {

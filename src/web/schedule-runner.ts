@@ -22,7 +22,7 @@ import {
   clearPendingTaskRetryAlert,
   markScheduledTaskKanbanWaiting,
 } from '../db.js'
-import { toPendingRetryView, classifySendError, type PendingRetryView } from '../pending-retries.js'
+import { toPendingRetryView, classifySendError, summarizePendingRetryBatch, type PendingRetryView } from '../pending-retries.js'
 import {
   SCHEDULED_TASK_PREAMBLE,
   wrapScheduledTask,
@@ -1216,6 +1216,84 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
   })()
 }
 
+// AGGREGATED escalation. The per-row alert above is correct and it FIRED --
+// on 2026-10-23 it sent ten Telegram messages between 11:10 and 18:00, one
+// per stuck task, each at ageMinutes 60. Nobody acted for nine hours, and
+// the reason is visible in the text it sends: every message names ONE task,
+// says it has been waiting 60 minutes, and closes with "a rendszer tovabb
+// probalkozik". Ten reassuring per-task notes never state the thing that
+// mattered -- that EVERY scheduled task on that agent was stuck behind one
+// common cause (an unrecognised footer, so the pane read 'unknown').
+//
+// So the fix is not a second, looser threshold next to a working one: it is
+// to say the sentence the operator needed. The 60-minute threshold and the
+// one-stamp-per-row guarantee are unchanged; only the DELIVERY is grouped,
+// per agent, per tick.
+function sendPendingRetryAlertBatch(views: PendingRetryView[], nowMs: number): void {
+  if (views.length === 0) return
+  // A single stuck task is not an outage: keep the existing per-task text,
+  // which carries the mcp-missing / first-run branches verbatim.
+  if (views.length === 1) { sendPendingRetryAlert(views[0], nowMs); return }
+
+  // Stamp every row first, same race guard as the single path. Only rows we
+  // actually claimed go into the message, so a row another tick alerted on
+  // is not reported twice.
+  const claimed = views.filter(v => markPendingTaskRetryAlert(v.taskName, v.agentName, nowMs))
+  if (claimed.length === 0) return
+
+  const agentName = claimed[0].agentName
+  const token = resolveSchedulerAlertToken()
+  if (!token) {
+    logger.warn({ agent: agentName, tasks: claimed.length, provider: CHANNEL_PROVIDER }, 'Pending-retry batch alert suppressed: no channel bot token (config error, stamps kept to avoid 60s spin)')
+    return
+  }
+  const ownerChat = resolveSchedulerOwnerChat()
+  if (!ownerChat) {
+    logger.warn({ agent: agentName, tasks: claimed.length, provider: CHANNEL_PROVIDER }, 'Pending-retry batch alert suppressed: no owner chat (ALLOWED_CHAT_ID unset/placeholder and no paired channel; stamps kept to avoid 60s spin)')
+    return
+  }
+
+  // The COMMON CAUSE is the point of the message. The decision (grouping +
+  // which cause is common) is pure and unit-tested in pending-retries.ts;
+  // only the operator-facing wording lives here, with the other alert texts.
+  const summary = summarizePendingRetryBatch(claimed)
+  if (!summary) return
+  const { reasons, oldestMinutes, commonReason: common } = summary
+  const diagnosis = common === 'busy'
+    ? `Közös ok: a cél-session egyetlen promptot sem fogad el (\`busy\`). Ez a tünete annak is, ha a pane-t a felismerő nem tudja olvasni, nem csak annak, ha tényleg dolgozik: tmux attach -t agent-${agentName}, és nézd meg, mi áll a lábléc helyén.`
+    : common === 'first-run'
+    ? `Közös ok: a session a Claude Code első-indítási képernyőjén áll (mappa-jóváhagyás vagy belépés).`
+    : common === 'mcp-missing'
+    ? `Közös ok: a szükséges MCP szerver(ek) nem futnak a cél-sessionben.`
+    : common === 'missing'
+    ? `Közös ok: a cél-session nem létezik (tmux session eltűnt vagy nem indult újra).`
+    : `Több különböző ok: ${reasons.join(', ')}.`
+  const text = [
+    `[${BOT_NAME} scheduler] A(z) "${agentName}" ágens ${summary.count} ütemezett feladata EGYSZERRE áll, a legrégebbi ${oldestMinutes} perce. Ez nem egy késő feladat, hanem az ágens ütemezett kézbesítése.`,
+    diagnosis,
+    `Feladatok: ${summary.taskNames.join(', ')}.`,
+    'A rendszer tovább próbálkozik, de magától NEM fog megoldódni, ha a fenti ok áll fenn.',
+  ].join('\n')
+
+  ;(async () => {
+    try {
+      await sendSchedulerAlertMessage(token, ownerChat, text)
+      logger.info({ agent: agentName, tasks: claimed.map(v => v.taskName), oldestMinutes, reasons, provider: CHANNEL_PROVIDER }, 'Pending-retry batch alert sent')
+    } catch (err) {
+      // Same transient/permanent split as the single path, applied to every
+      // stamp we claimed: a network blip must not consume the one alert the
+      // whole group gets.
+      const kind = classifySendError(err instanceof Error ? err.message : String(err))
+      if (kind === 'transient') {
+        logger.warn({ err, agent: agentName, tasks: claimed.length }, 'Pending-retry batch alert delivery failed (transient), clearing stamps for retry')
+        for (const v of claimed) clearPendingTaskRetryAlert(v.taskName, v.agentName)
+      } else {
+        logger.warn({ err, agent: agentName, tasks: claimed.length }, 'Pending-retry batch alert delivery failed (permanent), stamps kept to avoid 60s spin')
+      }
+    }
+  })()
+}
+
 // One-shot alert when a fired task/heartbeat has been continuously busy past
 // TASK_FIRE_TIMEOUT_MS. Follows the same token-resolution and owner-chat path as
 // sendPendingRetryAlert (provider-aware, over CHANNEL_PROVIDER): this is a
@@ -1405,6 +1483,10 @@ export function startScheduleRunner(): NodeJS.Timeout {
     // the UI if a retry has become obsolete.
     const pendingRows = listPendingTaskRetries()
     const pendingKeys = new Set<string>()
+    // Due alerts are collected per agent and dispatched after the loop, so
+    // N tasks stuck behind ONE cause produce one message naming that cause
+    // instead of N per-task notes (see sendPendingRetryAlertBatch).
+    const alertsDueByAgent = new Map<string, PendingRetryView[]>()
     for (const row of pendingRows) {
       // Locate the task definition. If it was deleted meanwhile, drop the
       // retry silently -- nothing to fire.
@@ -1461,7 +1543,11 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // do not alert.
       const reason = result === 'mcp-missing' ? mcpMissingReason(row.task_name, row.agent_name) : result
       const stillPresent = updatePendingTaskRetry(row.task_name, row.agent_name, now, reason)
-      if (stillPresent && view.alertDue) sendPendingRetryAlert(view, now)
+      if (stillPresent && view.alertDue) {
+        const bucket = alertsDueByAgent.get(row.agent_name)
+        if (bucket) bucket.push(view)
+        else alertsDueByAgent.set(row.agent_name, [view])
+      }
 
       // SCHEDPARK814 stale-parked-input janitor. A 'busy' verdict that keeps
       // repeating past the threshold is the one case worth a second look: the
@@ -1481,6 +1567,10 @@ export function startScheduleRunner(): NodeJS.Timeout {
           )
         }
       }
+    }
+
+    for (const views of alertsDueByAgent.values()) {
+      sendPendingRetryAlertBatch(views, now)
     }
 
     // Fire in injection-priority order, not directory order: with several
