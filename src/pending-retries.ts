@@ -67,6 +67,31 @@ export interface PendingRetryBatchSummary {
 }
 
 /**
+ * Whether an aggregated escalation may be sent for this agent now.
+ *
+ * Why a throttle is part of the fix and not a nicety: on 2026-10-23 the ten
+ * rows did NOT mature together. Their first_attempt values were staggered by
+ * ~10 minutes (the alert log shows ageMinutes 60 at 11:10, 11:20, 11:30,
+ * 11:30, 11:40, 11:50, 12:00, 13:00, 13:40, 18:00), so the 60-minute
+ * threshold came due in a DIFFERENT tick for almost every row. Grouping only
+ * the rows due in the same tick would therefore have aggregated nothing --
+ * nine or ten groups of one, i.e. the same ten messages with better wording.
+ *
+ * So the group is every row still stuck on the agent, and the message is
+ * rate-limited per agent to one per threshold window. The per-row stamp stays
+ * the per-row throttle; this is the per-AGENT one.
+ */
+export function shouldSendBatchAlert(
+  now: number,
+  lastSentAt: number | null,
+  thresholdMs: number = ALERT_THRESHOLD_MS,
+): boolean {
+  if (lastSentAt == null) return true
+  if (!Number.isFinite(now) || !Number.isFinite(lastSentAt)) return false
+  return now - lastSentAt >= thresholdMs
+}
+
+/**
  * Summarize a group of due retry rows for ONE agent.
  *
  * Why this is a decision and not formatting: the per-row alert already

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
-import { summarizePendingRetryBatch } from '../pending-retries.js'
+import { summarizePendingRetryBatch, shouldSendBatchAlert, ALERT_THRESHOLD_MS } from '../pending-retries.js'
 
 // AGGREGATED escalation for the 2026-10-23 outage.
 //
@@ -56,6 +56,21 @@ describe('summarizePendingRetryBatch (pure)', () => {
   it('treats a null reason as busy and an empty group as nothing to say', () => {
     expect(summarizePendingRetryBatch([view('a', null, 70)])!.commonReason).toBe('busy')
     expect(summarizePendingRetryBatch([])).toBe(null)
+  })
+})
+
+describe('shouldSendBatchAlert (pure)', () => {
+  const T = 1_000_000_000_000
+  it('speaks when this agent has not been reported yet', () => {
+    expect(shouldSendBatchAlert(T, null)).toBe(true)
+  })
+  it('stays quiet inside the window and speaks once it has passed', () => {
+    expect(shouldSendBatchAlert(T + ALERT_THRESHOLD_MS - 1, T)).toBe(false)
+    expect(shouldSendBatchAlert(T + ALERT_THRESHOLD_MS, T)).toBe(true)
+  })
+  it('refuses on a non-finite clock rather than guessing', () => {
+    expect(shouldSendBatchAlert(Number.NaN, T)).toBe(false)
+    expect(shouldSendBatchAlert(T, Number.NaN)).toBe(false)
   })
 })
 
@@ -153,6 +168,16 @@ async function runOneTick() {
   clearInterval(stop)
 }
 
+// Let the runner tick for a stretch of fake time, so a row's AGE grows past
+// the threshold mid-run -- the staggered case cannot be expressed in one tick.
+async function runTicksFor(ms: number) {
+  vi.resetModules()
+  const { startScheduleRunner } = await import('../web/schedule-runner.js')
+  const stop = startScheduleRunner()
+  await vi.advanceTimersByTimeAsync(ms)
+  clearInterval(stop)
+}
+
 describe('schedule runner: due alerts are grouped per agent', () => {
   beforeEach(() => {
     vi.stubEnv('SCHEDULER_TZ', 'Europe/Budapest')
@@ -203,5 +228,80 @@ describe('schedule runner: due alerts are grouped per agent', () => {
     await runOneTick()
     expect(mockSendMessage).not.toHaveBeenCalled()
     expect(mockMarkAlert).not.toHaveBeenCalled()
+  })
+})
+
+// THE REAL SHAPE, and the one the first version of this fix got wrong.
+//
+// The ten rows of 2026-10-23 did not mature together: their first_attempt
+// values were ~10 minutes apart (the alert log shows ageMinutes 60 at 11:10,
+// 11:20, 11:30, 11:30, 11:40, 11:50, 12:00, 13:00, 13:40, 18:00), so the
+// 60-minute threshold came due in a DIFFERENT tick for nearly every row.
+// Grouping only the rows due in the SAME tick aggregates nothing there: nine
+// or ten groups of one, i.e. the same ten messages with better wording.
+describe('schedule runner: staggered rows still produce ONE message', () => {
+  beforeEach(() => {
+    vi.stubEnv('SCHEDULER_TZ', 'Europe/Budapest')
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-23T10:30:00.000Z'))
+    mockListScheduledTasks.mockReturnValue(TASKS.map(task))
+    claimedRows.clear()
+    mockReady.mockReturnValue(false)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  })
+
+  it('counts every stuck row on the first due tick, not just the due one', async () => {
+    // Only the 61-minute row is due; the others are 10 and 20 minutes short.
+    mockListPendingRetries.mockReturnValue([row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)])
+    await runTicksFor(2 * 60_000)
+
+    expect(mockSendMessage).toHaveBeenCalledTimes(1)
+    const text = String(mockSendMessage.mock.calls[0][2])
+    // The message names all THREE, although only one crossed the threshold.
+    expect(text).toContain('3 ütemezett feladata EGYSZERRE áll')
+    for (const name of TASKS) expect(text).toContain(name)
+    expect(text).toContain('61 perce')
+    // ...and only the due row's stamp was spent.
+    expect(claimedRows.size).toBe(1)
+  })
+
+  it('does not repeat itself as the remaining rows come due inside the window', async () => {
+    mockListPendingRetries.mockReturnValue([row(TASKS[0], 61), row(TASKS[1], 51), row(TASKS[2], 41)])
+    // 25 minutes of ticks: the 51- and 41-minute rows cross 60 too.
+    await runTicksFor(25 * 60_000)
+
+    // Every row spends its own stamp -- the per-row guarantee is untouched...
+    expect(claimedRows.size).toBe(3)
+    // ...but the operator hears about this agent ONCE in the window.
+    expect(mockSendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('speaks again for a task that JOINS the queue after the window', async () => {
+    // A row cannot become due later than (its first_attempt + threshold), so
+    // a second message needs a task that ENTERS the queue later -- which is
+    // what happened on 2026-10-23: the 18:00 alert's row was first attempted
+    // at 17:00, hours after the first ones. The queue is re-read every tick,
+    // so the fixture grows with the clock.
+    // Build the rows ONCE: `row()` reads Date.now(), so composing them inside
+    // the implementation would re-stamp first_attempt on every tick and the
+    // ages would never grow -- a fixture that quietly freezes the clock.
+    const t0 = Date.now()
+    const early = [row(TASKS[0], 61), row(TASKS[1], 51)]
+    const late = { ...row(TASKS[2], 0), first_attempt: t0 + 70 * 60_000 }
+    mockListPendingRetries.mockImplementation(() =>
+      Date.now() >= t0 + 70 * 60_000 ? [...early, late] : [...early],
+    )
+    await runTicksFor(140 * 60_000)
+
+    expect(mockSendMessage).toHaveBeenCalledTimes(2)
+    // The first message knows nothing of the late task...
+    expect(String(mockSendMessage.mock.calls[0][2])).toContain('2 ütemezett feladata EGYSZERRE áll')
+    // ...the second counts all three.
+    expect(String(mockSendMessage.mock.calls[1][2])).toContain('3 ütemezett feladata EGYSZERRE áll')
+    expect(claimedRows.size).toBe(3)
   })
 })
