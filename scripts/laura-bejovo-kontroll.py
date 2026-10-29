@@ -29,16 +29,27 @@ Ezert van benne az `assert`: a nulla ITT a mero hibaja, nem allitas.
 A `content` text-blokkbol kiolvasott valtozat pedig a CSAK-MELLEKLETES uzeneteket dobja el
 (ma: 96 kontra 145) -- ezert illesztunk a NYERS soron, nem a dekodolt szovegen.
 """
-import re, glob, io, json, sys, os, hashlib, collections, datetime
+import re, glob, io, json, sys, os, hashlib, collections, datetime, sqlite3
+from zoneinfo import ZoneInfo
 
 GYOKER = '/root/.claude/projects/-root-marveen-marveen-marveen-marveen-agents-michel'
 CHAT   = json.load(io.open('/root/marveen/marveen/marveen/marveen/store/laura-chat.json'))['chat_id']  # NEM a kodban: a repo publikus
 MINTA  = (r'<channel source=\\"plugin:telegram:telegram\\" chat_id=\\"' + CHAT +
           r'\\"[^>]*?message_id=\\"(\d+)\\"[^>]*?ts=\\"([^\\]+)\\"')
 
+ZONA = ZoneInfo('Europe/Budapest')
+
 def helyi(ts):
+    # A FIX `timedelta(hours=2)` 2026-10-25-TOL (CET) EGY ORAVAL TOBB VOLT -- kimerve 2026-10-29,
+    # 30 uzenetre. A nap-szintu kimenet akkor meg BETURE egyezett a helyes zonaval (23 nap /
+    # NULLA-NAP 1 / horizont 09-13), tehat a kar NULLA volt, csak a kiirt ora kesett egy orat.
+    # DE LATENS VOLT, es a lappango alak a rosszabb: egy 23:00 es 24:00 kozott erkezo uzenet a
+    # KOVETKEZO napra kerult volna, es egy olyan napon mutatott volna bejovo aktivitast, amikor
+    # Laura nem irt -- vagyis a KAPU 1 nyitottnak latszott volna. Ugyanaz a kar-alak, mint a
+    # 9001-es teszt-fixturanal 2026-10-05-en, mas okbol. (A boss jovahagyasa: agent_messages 10815.)
     return (datetime.datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
-            + datetime.timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')
+            .replace(tzinfo=datetime.timezone.utc)
+            .astimezone(ZONA)).strftime('%Y-%m-%d %H:%M')
 
 gyoker = sys.argv[1] if len(sys.argv) > 1 else GYOKER
 pat    = re.compile(MINTA)
@@ -106,6 +117,46 @@ assert ids, f"A MERO VAK: 0 id ({gyoker}) -- a nulla NEM allitas"
 mero    = hashlib.md5(io.open(__file__, 'rb').read()).hexdigest()[:12]
 korpusz = hashlib.md5(' '.join(fajlok).encode()).hexdigest()[:12]
 ma      = [i for i in ids if helyi(tal[i]).startswith(datetime.date.today().isoformat())]
+
+# >>> A KAPU 1 ABLAKA: "AZ ELOZO KOR FUTASA OTA", NEM "MA" <<<
+# (kimerve 2026-10-29, 191 bejovon; a boss dontese agent_messages 10815, CSAK a sajat kreativ
+#  koromre). A naptari nap mint ablak akkor helyes, ha a mero EJFELKOR fut. Ez a kor 15:11 es
+#  15:15 kozott fut (63 korbol mind), tehat ami a kor UTAN erkezik, azt a mai kor mar nem latja,
+#  a HOLNAPI pedig datum szerint kizarja -- egyetlen kor sem ertekeli.
+#      a napi kor ELOTT erkezett (a kor latja) ......  91
+#      a kor UTAN, de meg aznap (sosem ertekelt) ....  100   = 52,4%
+#      olyan nap, amelyiken EGYETLEN bejovo sem erte el a kort:  8
+#  A JAVITAS IRANYA NEM KONZERVATIV: a res ALULSZAMOLJA a szal-napokat, tehat az uj ablak FELFELE
+#  viszi a KAPU2-szamlalot. Ezert all a boss (b) kikotese: egy hetig MINDKET ertek kimegy a
+#  markerbe, cimkezve, es a visszamenoleges p = 8/18 cimkeje `(regi proxy)` marad -- az a szam
+#  kezi szal-NAPOKON keszult, nem ezen a proxyn, tehat nem keverheto az uj ablakos szamokkal.
+#
+# A HATAR A TAROLOBOL JON, EPOCH-BAN (a boss (a) kikotese): az elozo KOR-KOMMENT `created_at`-je.
+# Semmilyen helyi-ido szoveg nem szerepel a szamitasban, tehat nincs zona-fordulat-csapda.
+# Kor-komment = sajat komment a `49fcae65`-on, SOR ELEJEN allo `KAPU2:` jelolovel (horgonyzott,
+# ahogy a szamlalonal -- a prozaba agyazott emlites nem szamit kornek).
+# A DB UTJA FELULIRHATO, HOGY A >48 ORAS AG PROBALHATO LEGYEN (pozitiv kontroll doktorált
+# masolaton). Ha nem az alapertelmezes, a szkript KIIRJA -- egy mero, ami nem arulja el, melyik
+# tarolobol olvasott, a megnyugtato iranyba teved.
+KARTYA = '49fcae65'
+DB = os.environ.get('KAPU1_DB', '/root/marveen/marveen/marveen/marveen/store/claudeclaw.db')
+if DB != '/root/marveen/marveen/marveen/marveen/store/claudeclaw.db':
+    print(f"FIGYELEM: NEM az eles tarolobol olvasom a KAPU1 hatarat, hanem: {DB}")
+_sor = sqlite3.connect(f'file:{DB}?mode=ro', uri=True).execute(
+    "SELECT id, created_at FROM kanban_comments WHERE card_id=? AND author='michel'"
+    "  AND (content LIKE 'KAPU2:%' OR content LIKE '%'||char(10)||'KAPU2:%')"
+    " ORDER BY created_at DESC LIMIT 1", (KARTYA,)).fetchone()
+
+def _epoch(ts):
+    return (datetime.datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+            .replace(tzinfo=datetime.timezone.utc).timestamp())
+
+if _sor is None:
+    # (a) kikotes: hatart NEM TALALUNK KI. A kapu ezt KIMONDJA, nem esik vissza a "MA"-ra.
+    ablak_id, ablak_tol, ablak = None, None, None
+else:
+    ablak_id, ablak_tol = _sor
+    ablak = [i for i in ids if _epoch(tal[i]) > ablak_tol]
 nap     = collections.Counter(helyi(t)[:10] for t in tal.values())
 nullas  = 0
 d = datetime.date.today()
@@ -158,7 +209,38 @@ print(f"HORIZONT: a legregebbi lathato uzenet {helyi(horizont)[:10]} ({_hnap} na
 print("          A hatart a leghosszabb eletu TULELO session tartja, nem a retention datuma: ALL,")
 print("          majd UGRIK, amikor az a session kiesik. A retention a FAJL mtime-jara ervenyes, ez")
 print("          a szam a TARTALOMRA -- ket kulonbozo idotengely, nem ellentmondas.")
-print(f"MA ({datetime.date.today()}): {len(ma)} bejovo" + (f"  {ma}" if ma else ""))
+print(f"MA ({datetime.date.today()}): {len(ma)} bejovo" + (f"  {ma}" if ma else "")
+      + "      [REGI PROXY: naptari nap]")
+if ablak is None:
+    print("KAPU1-ABLAK: NINCS ELOZO KOR-KOMMENT -- a hatar MERETLEN, es ezt a marker mondja ki.")
+    print("             A kapu NEM esik vissza a naptari napra: egy kitalalt hatar ugyanugy nez ki,")
+    print("             mint egy mert, es ezen a soron epul a KAPU2-szamlalo.")
+else:
+    _ora = (datetime.datetime.now().timestamp() - ablak_tol) / 3600.0
+    print(f"KAPU1-ABLAK: az elozo kor (komment {ablak_id}, "
+          f"{datetime.datetime.fromtimestamp(ablak_tol, ZONA).strftime('%Y-%m-%d %H:%M')}) ota: "
+          f"{len(ablak)} bejovo" + (f"  {ablak}" if ablak else "")
+          + f"      [UJ ABLAK, {_ora:.1f} ora]")
+    # >>> AZ ABLAKRA NINCS FELSO KORLAT, ES EZ SZANDEKOS -- DE JELZI MAGAT <<<
+    # (lucky kerdese, agent_messages 10818, 2026-10-29: "van FELSO korlat rajta, vagy szandekosan
+    #  nincs?" Nalam akkor meg NEM volt dontes, csak hallgatolagos alapertelmezes.)
+    # KORLAT HELYETT JELZES, es ez nem ovatoskodas: egy felso korlat UJRA letrehozna pont azt a
+    # vak ablakot, amit ez a javitas megszuntet -- a kihagyott kor napjai esnenek ki, vagyis epp
+    # az a nap, amelyiken a halo nem fogott. A hianyzo adat iranya ott a rossz.
+    # AMI VISZONT TORZUL, ES EZT KI KELL IRNI: ha egy ablak TOBB napot fed, a kor EGY
+    # `kerdest kapott` sort ir -- tehat az `n` mostantol KOR-t szamol, nem szal-NAPOT. A regi
+    # proxynal a ketto egybeesett (egy ablak = egy naptari nap); az egybeeses pont akkor szakad
+    # meg, amikor egy kor KIMARAD. A visszamenoleges p = 8/18 szal-NAPOKON keszult, tehat egy
+    # tobbnapos ablak utan a ket mennyiseg NEM ugyanaz, es a sor ezert irja ki az ablak hosszat.
+    if _ora > 48:
+        print(f"             FIGYELEM: az ablak {_ora/24:.1f} NAPOT fed, tehat kor maradt ki. A")
+        print( "             markerben MONDD KI, hany napot fed: egy tobbnapos ablak EGY")
+        print( "             `kerdest kapott` sort ad, vagyis az `n` itt KOR-t szamol, nem")
+        print( "             szal-NAPOT -- a p = 8/18 pedig szal-NAPOKON keszult.")
+    if ablak_tol > datetime.datetime.now().timestamp() - 3600:
+        print("             FIGYELEM: a hatar EGY ORANAL frissebb -- valoszinuleg a MAI kor sajat")
+        print("             kommentje. A kort a komment ELOTT kell futtatni, kulonben a sajat")
+        print("             sorod zarja ki a mai bejovoket.")
 print(f"NULLA-NAP egymas utan: {nullas}")
 print(f"utolso bejovo: {ids[-1]}  {helyi(tal[ids[-1]])}")
 print(f"mero_verzio={mero}  korpusz={korpusz}  fajl={len(fajlok)} ({' '.join(fajlok)})")
