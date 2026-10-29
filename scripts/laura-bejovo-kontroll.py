@@ -143,9 +143,19 @@ DB = os.environ.get('KAPU1_DB', '/root/marveen/marveen/marveen/marveen/store/cla
 if DB != '/root/marveen/marveen/marveen/marveen/store/claudeclaw.db':
     print(f"FIGYELEM: NEM az eles tarolobol olvasom a KAPU1 hatarat, hanem: {DB}")
 _sor = sqlite3.connect(f'file:{DB}?mode=ro', uri=True).execute(
-    "SELECT id, created_at FROM kanban_comments WHERE card_id=? AND author='michel'"
+    "SELECT id, created_at, content FROM kanban_comments WHERE card_id=? AND author='michel'"
     "  AND (content LIKE 'KAPU2:%' OR content LIKE '%'||char(10)||'KAPU2:%')"
     " ORDER BY created_at DESC LIMIT 1", (KARTYA,)).fetchone()
+
+# >>> A TAROLT HATAR A KOR PROBA-IDEJE, NEM A KOR-KOMMENT IDEJE <<<
+# (a boss pontositasa, agent_messages 10852, marci 10849-es leletebol; marci nala ~4,5 perc,
+#  2026-10-28-an 15+ perc vak ablakot mert emiatt.)
+# A kor-komment `created_at`-je a kor VEGE. Ha azt hasznaljuk hatarkent, a kor SAJAT HOSSZA
+# (a bejovok elolvasasa es a komment kiirasa kozotti ido) vak ablak marad -- naponta ujra.
+# Ezert a kor a komment ELSO soraiba kiirja a PROBA idejet epoch-ban, es a kapu AZT olvassa.
+# A visszaesés NEVESITETT: ha a sor hianyzik (regi kor-komment), a `created_at` all be helyette,
+# es a kimenet KIMONDJA, hogy ekkor a kor hossza vak marad -- nem csendben esik vissza.
+_proba = re.search(r'(?:^|\n)PROBA-IDO:\s*(\d{10})\b', _sor[2]) if _sor else None
 
 def _epoch(ts):
     return (datetime.datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
@@ -155,7 +165,10 @@ if _sor is None:
     # (a) kikotes: hatart NEM TALALUNK KI. A kapu ezt KIMONDJA, nem esik vissza a "MA"-ra.
     ablak_id, ablak_tol, ablak = None, None, None
 else:
-    ablak_id, ablak_tol = _sor
+    ablak_id, ablak_tol = _sor[0], _sor[1]
+    ablak_fajta = 'kor-komment ideje (a kor VEGE)'
+    if _proba:
+        ablak_tol, ablak_fajta = int(_proba.group(1)), 'a kor PROBA-ideje'
     ablak = [i for i in ids if _epoch(tal[i]) > ablak_tol]
 nap     = collections.Counter(helyi(t)[:10] for t in tal.values())
 nullas  = 0
@@ -221,6 +234,11 @@ else:
           f"{datetime.datetime.fromtimestamp(ablak_tol, ZONA).strftime('%Y-%m-%d %H:%M')}) ota: "
           f"{len(ablak)} bejovo" + (f"  {ablak}" if ablak else "")
           + f"      [UJ ABLAK, {_ora:.1f} ora]")
+    print(f"             a hatar fajtaja: {ablak_fajta}")
+    if not _proba:
+        print("             A `PROBA-IDO:` sor HIANYZIK ebbol a kor-kommentbol, tehat a hatar a kor")
+        print("             VEGE, es a kor SAJAT HOSSZA vak ablak marad. A kor irja ki a kommentbe:")
+        print("             `PROBA-IDO: <epoch>`, a bejovok elolvasasanak idejevel.")
     # >>> AZ ABLAKRA NINCS FELSO KORLAT, ES EZ SZANDEKOS -- DE JELZI MAGAT <<<
     # (lucky kerdese, agent_messages 10818, 2026-10-29: "van FELSO korlat rajta, vagy szandekosan
     #  nincs?" Nalam akkor meg NEM volt dontes, csak hallgatolagos alapertelmezes.)
