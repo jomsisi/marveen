@@ -146,6 +146,71 @@ assert not utkozes, f"ELO fa a kivetelben: {sorted(utkozes)}"
 # hogy ne szuletjen harmadik jelentes ugyanarra a kodra.
 assert ISMERT_ALAK, "a registry `ismert_alakok` listaja URES -- az ismeretlen-alak ag kikapcsolna"
 
+# ===== FIXTURE-GYOKER: A MERO POZITIV KONTROLLJA, KULON KORPUSZON (2026-11-06) =====
+# MIERT KELL: az auth-ag (a) szamanak EGYETLEN igaz pozitivja 2026-10-07-ig harom transzkript-sor
+# volt az ELO faban ('Not logged in - Please run /login', 15:05:26/29/32). Ezek a sorok a 30 napos
+# transzkript-retencio hataran allnak, tehat kiesnek -- es a kiesesuk utan az (a)=0 IGAZ allitas egy
+# 30 napos ablakrol, de EGYUTTAL megszunteti az egyetlen bizonyitekot arra, hogy a mezo+minta
+# egyaltalan TUD talalatot adni. A ket dolog kulonbozik, es eddig egybeesett: az "(a)=0" azota nem
+# azt jelenti, hogy nincs auth-hiba, hanem azt, hogy NEM TUDJUK, latnank-e. A fixture ezt a MASODIK
+# kerdest valaszolja meg, es CSAK azt.
+# A SZAMAI SZANDEKOSAN NEM KEVERNEK az (a)/(b)/(c)/(d)-be, es NEM valtanak ki rc=2-t: a fixture
+# tartalma ALLANDO, tehat egy allando auth-talalat allando hamis pozitiv lenne -- es a registry
+# sajat `ismert_megjegyzes` mezoje mar kimondja, hogy "az allando hamis pozitiv a szomszed szamokat
+# rontja".
+# A KULCS HIANYA NEM CSENDES ATENGEDES (ugyanaz a fail-closed osztaly, mint a ket fenti assert, es
+# ugyanaz a rc=1 registry-hiba kod -- nem szuletik harmadik jelentes ugyanarra).
+# >>> AMIERT EZ A KONTROLL EGYALTALAN MEGER EGY ROVATOT -- EGY MUTANS, 2026-11-06. <<<
+# A gyorsito elo-szuro kulcsnevet elirva (`isApiErrorMessageXYZZY`) a FIXTURE NELKULI kod ezt
+# jelentette a szintetikus fan: `fajl: 141`, (a)=0, (b)=0, `fajtak: 0 fajta, osszesen 0 = (b)`,
+# **rc=0**. Minden belso osszeg-azonossag TELJESULT, a kimenet onmagaban KONZISZTENS, es betűre
+# ugy nez ki, mint egy tiszta fa -- a `fajl: 141` pedig a meglevo "A MERO NEM LAT" agat is
+# kielegiti, mert az a FAJL-szamra szur, nem a kiolvasott sorokra. Ugyanazon a bemeneten a
+# fixture-rel rc=1 es hangos (f) sor jon. A kontroll tehat nem a fa allapotarol mond ujat, hanem
+# arrol, hogy a KIOLVASAS mukodik-e -- es erre eddig egyetlen rovat sem felelt.
+FIX_GYOKER = cfg.get('fixture_gyoker')
+assert FIX_GYOKER, ("a registry `fixture_gyoker` kulcsa hianyzik vagy ures -- a mero pozitiv "
+                    "kontrollja kikapcsolna, es a kikapcsolt kontroll NEMA nullat ad")
+_fix_alap     = cfg.get('fixture_alapvonal') or {}
+FIX_VART_FAJL = _fix_alap.get('fajl')
+FIX_VART_AUTH = _fix_alap.get('auth')
+assert isinstance(FIX_VART_FAJL, int) and isinstance(FIX_VART_AUTH, int), (
+    "a registry `fixture_alapvonal` {fajl, auth} egesz parja hianyzik -- alapvonal nelkul a "
+    "kontroll csak azt tudna megmondani, hogy NEM NULLA, es egy mindenre illeszkedo minta is "
+    "atmenne rajta")
+# ES A FIXTURE NEM LEHET A PROJECTS-FAN BELUL: onnan ugyanazok a sorok az (a)/(b)-be IS
+# beszamolnanak, tehat a kontroll megduplazna a sajat alanyat, es a kettos szamolas a
+# MEGNYUGTATO iranyba teved (tobb talalat latszik, mint amennyi esemeny tortent).
+assert os.path.commonpath([os.path.realpath(FIX_GYOKER), os.path.realpath(ROOT)]) != os.path.realpath(ROOT), (
+    f"a `fixture_gyoker` a `projects_gyoker` FAN BELUL all ({FIX_GYOKER}) -- a sorai ketszer "
+    f"szamolodnanak")
+
+
+def mezo_jelolt_sorok(ut):
+    """(ts, szoveg) parok egy jsonl-bol: a MEZO-JELOLT sorok, EGY helyen definialva.
+
+    AZERT FUGGVENY, ES EZ NEM STILUS-KERDES. A fixture-gyoker azt a POZITIV KONTROLLT adja, hogy
+    a mezo+minta tud auth-talalatot adni. Ha a kontroll MAS kodon olvasna a sorokat, mint az elo
+    meres, akkor az elo olvasas elromlasa mellett is tovabb mutatna "3/3 OK"-t -- vagyis pont
+    arrol hallgatna, amire valo. **Egy kontroll, ami nem a mert dolog kodjat futtatja, nem
+    kontroll.** A fajl mar hordoz egy rokon kockazatot (`_rogzitett_peldany` kereszt-hivatkozas:
+    ket implementacio EGY szabalyra); itt ket implementacio EGY MERESRE lett volna.
+
+    GYORSITO ELO-SZURO: a KULCS NEVERE szur, az ERTEKRE NEM. A szerializalt alakra fogadni
+    (`"isApiErrorMessage":true`) csendes nullat ad egyetlen szokozre is (a boss mutansa,
+    2026-09-30). A szigoru ellenorzes a `json.loads` utan dont.
+    """
+    for l in open(ut, encoding='utf-8', errors='replace'):
+        if 'isApiErrorMessage' not in l:
+            continue
+        try: d = json.loads(l)
+        except Exception: continue
+        if d.get('isApiErrorMessage') is not True:
+            continue
+        c = d.get('message', {}).get('content')
+        t = ' '.join(x.get('text','') for x in c if isinstance(x, dict)) if isinstance(c, list) else str(c)
+        yield d.get('timestamp'), t
+
 def projekt(path):
     rel = os.path.relpath(path, ROOT)
     return rel.split(os.sep)[0]
@@ -178,19 +243,7 @@ if not elo_files:
     sys.exit(1)
 for f in files:
     kiz = projekt(f) in KIZART
-    for l in open(f, encoding='utf-8', errors='replace'):
-        # GYORSITO elo-szuro: a KULCS NEVERE szur, az ERTEKRE NEM. A szerializalt alakra
-        # fogadni (`"isApiErrorMessage":true`) csendes nullat ad egyetlen szokozre is
-        # (a boss mutansa, 2026-09-30). A szigoru ellenorzes lentebb dont.
-        if 'isApiErrorMessage' not in l:
-            continue
-        try: d = json.loads(l)
-        except Exception: continue
-        if d.get('isApiErrorMessage') is not True:
-            continue
-        c = d.get('message', {}).get('content')
-        t = ' '.join(x.get('text','') for x in c if isinstance(x, dict)) if isinstance(c, list) else str(c)
-        ts = d.get('timestamp')
+    for ts, t in mezo_jelolt_sorok(f):
         if kiz:
             kiz_total += 1
             if ts: kiz_ts.append(ts)
@@ -203,6 +256,27 @@ for f in files:
             if ISMERT_ALAK and t.strip() not in ISMERT_ALAK:
                 uj_alak.append((ts, projekt(f), t.strip()))
 
+# A FIXTURE MERESE -- UGYANAZZAL a `mezo_jelolt_sorok` olvasoval es UGYANAZZAL az `AUTH` mintaval,
+# mint az elo fa. Kulon szamlalok, hogy egyetlen erteke se tudjon az (a)/(b)/(c)/(d)-be szivarogni.
+fix_files = sorted(glob.glob(os.path.join(FIX_GYOKER, '**', '*.jsonl'), recursive=True))
+fix_total, fix_auth = 0, []
+for f in fix_files:
+    for ts, t in mezo_jelolt_sorok(f):
+        fix_total += 1
+        if AUTH.search(t):
+            fix_auth.append((ts, os.path.basename(f), t[:70]))
+# A VERDIKT EGYENLOSEG, NEM "NEM NULLA" -- a korpusz FAGYOTT, tehat az alapvonal pontos ertek lehet.
+# AZ INDOK MERT, MUTACIOVAL (2026-11-06): a `> 0` alak a RESZLEGES eltunest atengedi. Harom fajlbol
+# kettore csokkentve `len(fix_auth)==2`, es a `> 0` mutans rc=0-t adott, az egyenloseg rc=1-et.
+# Ez a valoszinubb romlas is: a fixture mentes nelkul all, tehat egy fajl elvesztese elobb jon, mint
+# mind a harome.
+# ES AMIT EZ A KONTROLL NEM BIZONYIT, kimondva: a TULILLESZKEDES ellen nem ved. Egy mindenre
+# illeszkedo minta ezen a korpuszon szinten 3/3-at ad (mind a harom mezo-jelolt sor auth is),
+# tehat az egyenloseg sem fogja meg. Azt az iranyt az ELO szamok mutatjak: a tulilleszkedestol az
+# (a)/(b) UGRIK (mutacioval merve: a=146, b=414 a mai 3 es 44 helyett). A ket irany ket kulon
+# meron all, es egyik sem helyettesiti a masikat.
+fix_ok = (len(fix_files) == FIX_VART_FAJL and len(fix_auth) == FIX_VART_AUTH)
+
 elo_ts.sort(); kiz_ts.sort()
 print(f"  fajl: {len(files)}   kizart projekt: {sorted(KIZART) if KIZART else '-'}")
 print(f"  (a) auth-reszhalmaz, kivetel nelkul .......... {len(elo_auth)}")
@@ -212,6 +286,17 @@ print(f"  (c) legutobbi barmilyen, KIVETEL NELKUL ...... {elo_ts[-1] if elo_ts e
 print(f"  (d) kizarva: {kiz_total}" + (f"  ({', '.join(kiz_ts)})" if kiz_ts else ""))
 for ts, p, t in kiz_auth:
     print(f"      ebbol auth: {ts}  [{p}]  {t}")
+# (f) A FIXTURE. KULON SOR, es a fejlec KIMONDJA, hogy a szamai NINCSENEK a fentiekben -- nem az
+# olvasora bizza. A ketto osszekeverese epp a kettos szamolas iranyaba tevedne.
+if fix_ok:
+    print(f"  (f) fixture (pozitiv kontroll, KULON gyoker, az (a)-(d)-ben NINCS benne) ....... "
+          f"fajl {len(fix_files)}/{FIX_VART_FAJL}, auth-talalat {len(fix_auth)}/{FIX_VART_AUTH}  OK")
+else:
+    print(f"  (f) fixture   *** A POZITIV KONTROLL ELTUNT VAGY ELMOZDULT: fajl {len(fix_files)} "
+          f"(vart {FIX_VART_FAJL}), auth-talalat {len(fix_auth)} (vart {FIX_VART_AUTH}) ***")
+    print(f"      gyoker: {FIX_GYOKER}")
+    print(f"      AMIT EZ JELENT: az (a) szam ettol fuggetlenul all, DE IGAZOLATLAN -- nem tudjuk,")
+    print(f"      hogy egy valodi auth-talalat atjonne-e a mezon es a mintan. A nulla NEM allitas.")
 if elo_auth:
     print("  *** ELO FABAN AUTH-TALALAT ***")
     for ts, p, t in elo_auth:
@@ -298,7 +383,14 @@ print("      alattam; ELTER -> a futo kod NEM rogzitett peldany. A FUTO kodrol c
 
 _allapot.update(kod=2 if elo_auth else 0,
                 jel=f'a={len(elo_auth)}:b={elo_total}:d={kiz_total}:fajl={len(files)}'
-                    f':uj_alak={len(uj_alak)}:fajtak={len(fajta)}')
+                    f':uj_alak={len(uj_alak)}:fajtak={len(fajta)}'
+                    f':fixture={len(fix_auth)}/{FIX_VART_AUTH}'
+                    + ('' if fix_ok else ':FIXTURE_BUKOTT'))
+# A FIXTURE ALLAPOTA A BELYEGBE IS BEKERUL, MINDEN KORBEN, ES EZ NEM REDUNDANCIA. A kilepesi kod
+# alabb az ELO talalatnak ad elsobbseget (rc=2), tehat egy olyan napon, amikor valodi auth-talalat
+# IS van, a bukott kontroll a KODBOL nem latszana. A belyeg a hosszu tavu nyom: ha a "mikor tunt el
+# a kontroll" kerdes kesobb elojon, ebbol megvalaszolhato -- ugyanaz az indok, amiert a `fajtak`
+# csendesen bekerult.
 # A `fajtak` CSENDESEN kerul a belyegbe, jelzes NELKUL, es ez szandekos (michel merese, 2026-10-05).
 # A kulcs `[:52]`, es a `resets 12pm` token az egyik ismert alakban a 31. karakteren all (a kulcson
 # BELUL), a masikban a 81-en (kivul). Amikor a vendor atirja az orat, az elso alak UJ kulcsot kap,
@@ -307,4 +399,15 @@ _allapot.update(kod=2 if elo_auth else 0,
 # az ESEMENYT amugy is a megfelelo mechanizmus jelzi: az `uj_alak` ag a TELJES szoveget veti ossze
 # (`t.strip() not in ISMERT_ALAK`), tehat az uj ora-ertek ott jon ki, a mar dokumentalt teendovel.
 # A belyegbe azert kerul be, hogy a "mikor valtozott" kerdes KESOBB megvalaszolhato legyen.
-sys.exit(2 if elo_auth else 0)
+# KILEPESI KOD, ES A SORREND INDOKA:
+#   2 = ELO FABAN AUTH-TALALAT  -- ez a cselekvest igenylo riasztas, ezert ELSOBBSEGET kap.
+#   1 = a MERO vak/igazolatlan  -- ugyanaz a jelentes, mint a fenti ket korai rc=1 (registry-hiba,
+#       "A MERO NEM LAT"): nem a vilagrol allit, hanem a merorol. Uj kod NEM keletkezik.
+#   0 = tiszta ES igazolt mero.
+# A BUKOTT KONTROLL KILEPESE SZANDEKOSAN ITT, A VEGEN ALL, NEM KORAI `sys.exit`-KENT: a fenti ket
+# rc=1 ag azonnal kilep, mert ott NINCS mit jelenteni (a mero nem latott semmit). Itt VAN: az elo
+# szamok ervenyesek es ki vannak irva. Ha a kontroll hianya elvagna a kimenetet, akkor a kontroll
+# ELTUNESE ELNEMITANA AZT A MERESET, AMIT IGAZOLNI HIVATOTT -- vagyis a vedelem vinne el az alanyt.
+if elo_auth:
+    sys.exit(2)
+sys.exit(0 if fix_ok else 1)
