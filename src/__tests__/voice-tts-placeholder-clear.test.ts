@@ -108,6 +108,40 @@ describe('clearPlaceholdersAfterVoiceDelivery', () => {
     expect(existsSync(join(dir, 'progress', 's1.json'))).toBe(true)
   })
 
+  // SURVIVING MUTANT, found in review (boss, msg 12137): binding the pending-file
+  // write to the token kept the whole suite green. The delete of the Telegram
+  // placeholder MESSAGE does need a token, but dropping the BOOKKEEPING entry
+  // must not -- that entry is what the Stop hook reads, so a token-less (or
+  // token-rotated) state dir would otherwise still force a second, textual
+  // answer for a question already answered in voice. Both shapes are covered:
+  // a .env without the key, and no .env at all.
+  it('drops the pending entry even with no bot token (cosmetic delete skipped, hook silenced)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'tgprogress-'))
+    writeFileSync(join(dir, '.env'), 'TELEGRAM_CHAT_ID=111\n')  // no TELEGRAM_BOT_TOKEN
+    mkdirSync(join(dir, 'progress'))
+    writeFileSync(join(dir, 'progress', 'sid-notoken.json'), JSON.stringify([{ chat_id: '111', message_id: 9001 }]))
+
+    const dropped = await clearPlaceholdersAfterVoiceDelivery({ delivered: true, stateDir: dir, chatId: '111' })
+    expect(dropped).toBe(1)
+    expect(existsSync(join(dir, 'progress', 'sid-notoken.json'))).toBe(false)
+    expect(calls).toEqual([])  // nothing to call the API with
+
+    // The point of dropping it: the Stop hook must stay silent.
+    const after = runStopHook(dir, 'sid-notoken')
+    expect(after.decision).toBe(null)
+    expect(after.stdout).toBe('')
+  })
+
+  it('drops the pending entry with no .env in the state dir at all', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'tgprogress-'))
+    mkdirSync(join(dir, 'progress'))
+    writeFileSync(join(dir, 'progress', 'sid-noenv.json'), JSON.stringify([{ chat_id: '111', message_id: 9001 }]))
+    const dropped = await clearPlaceholdersAfterVoiceDelivery({ delivered: true, stateDir: dir, chatId: '111' })
+    expect(dropped).toBe(1)
+    expect(existsSync(join(dir, 'progress', 'sid-noenv.json'))).toBe(false)
+    expect(calls).toEqual([])
+  })
+
   it('is a silent no-op with no pending placeholder at all', async () => {
     dir = mkdtempSync(join(tmpdir(), 'tgprogress-'))
     writeFileSync(join(dir, '.env'), 'TELEGRAM_BOT_TOKEN=123:TEST\n')
