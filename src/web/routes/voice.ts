@@ -3,6 +3,8 @@
 // All endpoints require Bearer auth (enforced by src/web.ts before routing).
 // STT: POST /api/voice/stt     -- transcribe a Telegram voice file_id
 // TTS: POST /api/voice/tts     -- synthesize text to ogg/opus, send via Telegram sendVoice
+//                                 (a CONFIRMED send also clears that chat's progress
+//                                  placeholder -- see telegram-progress.ts for why)
 // Config: GET/PUT /api/agents/:id/voice-config  (handled in agents.ts; see there)
 // Modality: GET /api/voice/modality?agent=X&chat=Y
 //           POST /api/voice/modality/set -- set last inbound modality (future plugin hook use)
@@ -23,6 +25,7 @@ import { readBody, json } from '../http-helpers.js'
 import { KNOWN_VOICE_MODELS, AGENTS_BASE_DIR, readAgentVoiceConfig } from '../agent-config.js'
 import { getLastInboundModality, setLastInboundModality } from '../voice-modality.js'
 import { buildTtsDirective, resolveAgentChannelStateDir, inboundIsAudio, shouldSpeakInAuto } from '../voice-directive.js'
+import { clearPlaceholdersAfterVoiceDelivery } from '../telegram-progress.js'
 import { PROJECT_ROOT } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -259,8 +262,18 @@ export async function tryHandleVoice(ctx: RouteContext): Promise<boolean> {
     // _vtools.py prints "ok=True id=12345" or "ok=False id=None"
     const okMatch = result.stdout.match(/ok=(\w+)/)
     const idMatch = result.stdout.match(/id=(\d+)/)
+    const delivered = okMatch?.[1]?.toLowerCase() === 'true'
+    // A delivered voice message IS this turn's answer to that chat, but the
+    // progress-placeholder bookkeeping only hears about the Telegram `reply`
+    // TOOL -- and this directive forbids a text reply. Without this the Stop
+    // hook reads the leftover placeholder as "never answered" and forces a
+    // second, textual answer for the same question (card
+    // stop-hook-hang-valasz-dupla-reply). Awaited on purpose: the agent's turn
+    // can end the moment this response returns, so the placeholder has to be
+    // gone BEFORE the Stop hook looks. `delivered: false` clears nothing.
+    await clearPlaceholdersAfterVoiceDelivery({ delivered, stateDir, chatId })
     json(res, {
-      ok: okMatch?.[1]?.toLowerCase() === 'true',
+      ok: delivered,
       message_id: idMatch ? parseInt(idMatch[1], 10) : null,
     })
     return true
