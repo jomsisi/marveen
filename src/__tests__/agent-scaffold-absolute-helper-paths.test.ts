@@ -84,6 +84,10 @@ function writeAgentFile(name: string, content: string): string {
   mkdirSync(dir, { recursive: true })
   const file = join(dir, 'CLAUDE.md')
   writeFileSync(file, content, 'utf-8')
+  // v1.47.0: the default recipes go through marveen-api.sh; the fork's agent-msg.sh / dash-api.sh forms are
+  // the arm an agent that may not run `bash` gets (permissions.deny Bash(bash:*)), which is what this suite pins.
+  mkdirSync(join(dir, '.claude'), { recursive: true })
+  writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: ['Bash(bash:*)'] } }), 'utf-8')
   return file
 }
 

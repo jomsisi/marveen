@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
 Take /status and /help away from the Telegram channel plugin (ELSOKOR922 D-4),
-mark forwarded messages in the inbound meta (forwarded="1"), record every
+mark forwarded messages in the inbound meta (forwarded="1"), carry the
+excerpt a reply quotes (reply_to_message_id, reply_to_text), record every
 inbound message the bot receives (the evidence owner WRITE commands need),
-and -- only while TELEGRAM_TOPICS_ENABLED is on -- carry the topic of a
-message in and the answer back into it (see TOPICS_STEPS).
+strip the invisible Unicode characters a pasted or forwarded text can carry
+out of the text handed to the model, and -- only while
+TELEGRAM_TOPICS_ENABLED is on -- carry the topic of a message in and the
+answer back into it (see TOPICS_STEPS). While TELEGRAM_REPLY_BUTTONS is off
+the reply tool sends no answer buttons (see KBD_OFF_CHECK).
 
 The official plugin (claude-plugins-official/telegram/<ver>/server.ts) answers
 /status ("Paired as ...") and /help itself, inside its bot poller -- those
@@ -28,8 +32,8 @@ must not rewrite the user-level cache other Claude Code sessions load
   -- /status and /help then fall back to the plugin's own answers, or a
   forwarded command is not refused; the channel itself is not touched;
 - always exits 0: a failed patch must never stop the channel from starting
-  (the one exception is a --topics value other than on or off: exit 2, nothing
-  patched; channels.sh never passes --topics);
+  (the one exception is a --topics or --buttons value other than on or off:
+  exit 2, nothing patched; channels.sh passes neither);
 - the answer-buttons patch (c67f5f34: inline keyboard under the message, a
   tap comes back as an ordinary text message) inserts WHOLE LINES only, each
   carrying its marker, so taking it back is deleting the lines that carry
@@ -40,9 +44,10 @@ must not rewrite the user-level cache other Claude Code sessions load
   JSON, so /status can say in one line when a patch is missing
   (src/web/system-status.ts) instead of the command silently falling back.
 
-Usage: patch-telegram-plugin.py [--state FILE] [--topics on|off] [<plugins cache root>]
+Usage: patch-telegram-plugin.py [--state FILE] [--topics on|off] [--buttons on|off] [<plugins cache root>]
 (default root: $CLAUDE_CONFIG_DIR/plugins/cache, else ~/.claude/plugins/cache;
-without --topics the TELEGRAM_TOPICS_ENABLED setting of this install decides)
+without --topics the TELEGRAM_TOPICS_ENABLED setting of this install decides,
+without --buttons the TELEGRAM_REPLY_BUTTONS setting, default on)
 """
 import json
 import os
@@ -54,6 +59,8 @@ MARKER = "// MARVEEN-PATCH(elsokor922-d4): /status and /help belong to the comma
 FWD_MARKER = "// MARVEEN-PATCH(elsokor922-fwd): forwarded flag for the command hook"
 EVID_MARKER = "// MARVEEN-PATCH(cmd920-evid): inbound evidence for owner write commands"
 KBD_MARKER = "// MARVEEN-PATCH(c67f5f34-kbd): one-tap answer buttons"
+QUOTE_MARKER = "// MARVEEN-PATCH(quote1101): quoted excerpt of a reply"
+SILENT_MARKER = "// MARVEEN-PATCH(tgsilent): reply without a notification sound"
 
 # Each anchor is the handler's full block, up to its closing `})` at column 0.
 ANCHORS = [
@@ -67,6 +74,27 @@ ANCHORS = [
 # test bot, 2026-09-23: a forwarded /status ran). One meta key more, right
 # after user_id, and the hook refuses to run a forwarded command.
 FWD_ANCHOR = ("inbound meta user_id", re.compile(r"^( *)user_id: String\(from\.id\),\n", re.MULTILINE))
+
+# When the owner replies to an earlier message (Telegram "Reply", or a
+# selected part of it), the update carries reply_to_message and, for a
+# selection, quote -- but the meta drops both, so the session sees only "erre"
+# with nothing to point at (owner report, 2026-11-01). Two meta keys more:
+# reply_to_message_id, and reply_to_text, a single-line EXCERPT only (the
+# selected part when there is one, else the start of the quoted message;
+# whitespace collapsed, at most 300 characters), never the whole history.
+# reply_to_selected="1" marks that the excerpt is the owner's own selection.
+# The 300 counts code points (Array.from), so an emoji is never cut in half; an
+# empty selection falls back to the quoted message (||, not ??); a reply to a
+# message with no text or caption (sticker, voice) carries no reply_to_text.
+QUOTE_ANCHOR = ("inbound meta ts", re.compile(r"^( *)ts: new Date\(\(ctx\.message\?\.date \?\? 0\) \* 1000\)\.toISOString\(\),\n", re.MULTILINE))
+QUOTE_INSERT = (
+    "{indent}...(ctx.message?.reply_to_message ? ((excerpt, selected) => ({{ "
+    "reply_to_message_id: String(ctx.message.reply_to_message.message_id), "
+    "...(excerpt ? {{ reply_to_text: excerpt }} : {{}}), ...(selected ? {{ reply_to_selected: '1' }} : {{}}) }}))("
+    "Array.from((ctx.message.quote?.text || ctx.message.reply_to_message.text || ctx.message.reply_to_message.caption || '')"
+    ".replace(/\\s+/g, ' ').trim()).slice(0, 300).join(''), !!ctx.message.quote?.text) : {{}}), "
+    + QUOTE_MARKER + "\n"
+)
 
 # Owner WRITE commands (/model, /context clear, ...) run only when the message
 # they came in is on record HERE, in the plugin process, the one place that
@@ -151,7 +179,7 @@ KBD_SEND = ("reply send options", re.compile(
         "{ remove_keyboard: true as const } } : {}),",
     ]))
 KBD_SET = ("permission reply regex", re.compile(r"^( *)const PERMISSION_REPLY_RE = [^\n]*\n", re.MULTILINE), "insert-after",
-    _kbd_lines(["const marveenKbdAnswered = new Set<string>()"]))
+    _kbd_lines(["const marveenKbdAnswered = new Set<string>(), marveenKbdOpen = new Map<string, Set<number>>()"]))
 KBD_CALLBACK = ("callback perm regex", re.compile(
     r"^( *)const m = /\^perm:\(allow\|deny\|more\):\(\[a-km-z\]\{5\}\)\$/\.exec\(data\)\n", re.MULTILINE), "insert-after",
     _kbd_lines([
@@ -171,6 +199,8 @@ KBD_CALLBACK = ("callback perm regex", re.compile(
         "  if (marveenKbdAnswered.has(kbdKey)) { await kbdToast('Erre már válaszoltál.'); return }",
         "  if (marveenKbdAnswered.size >= 1000) marveenKbdAnswered.clear()",
         "  marveenKbdAnswered.add(kbdKey)",
+        "  marveenKbdOpen.get(kbdMsg.chat.id + ('is_topic_message' in kbdMsg && kbdMsg.is_topic_message "
+        "&& kbdMsg.message_thread_id != null ? '#' + kbdMsg.message_thread_id : ''))?.delete(kbdMsg.message_id)",
         "  try { await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: "
         "[[{ text: '✓ ' + kbdButton.text, callback_data: 'kbd:-' }]] } }) } "
         "catch { marveenKbdAnswered.delete(kbdKey); await kbdToast('Nem sikerült rögzíteni, írd be a választ.'); return }",
@@ -189,10 +219,137 @@ KBD_TS = ("inbound meta imagePath", re.compile(
         "...(ctx.callbackQuery?.message ? { ts: new Date().toISOString(), "
         "message_id: String(ctx.callbackQuery.message.message_id) } : {}),",
     ]))
-KBD_ANCHORS = [KBD_SCHEMA, KBD_CHECK, KBD_SEND, KBD_SET, KBD_CALLBACK, KBD_TS]
+# ISSUE2398KBD (marveen#2398): a question answered by TYPING kept its live buttons. The question's message id is
+# remembered per chat when the keyboard goes out (the last text chunk of the reply), and the next typed text message
+# from that chat takes the buttons off every open question there and marks them answered BEFORE the edit goes out,
+# so a late tap (an update already on its way) gets the "already answered" toast and delivers nothing. A tap takes
+# its own question off the open list. A permission reply ("yes abcde") returns earlier and leaves them alone; so does
+# a photo, voice or file. The open list is keyed by chat AND topic (chat_id, plus '#<message_thread_id>' for a
+# topic message, the topics patch's own rule: is_topic_message), so a text typed into ANOTHER topic of the same chat
+# closes nothing (Dani 64318, Samu 64325). The edit is fire and forget: a message too old to edit keeps its buttons, the Set still
+# refuses the tap. Both containers are bounded like the Set (emptied past 1000 chats).
+KBD_OPEN = ("reply text chunk sent", re.compile(
+    r"^( *)sentIds\.push\(sent\.message_id\)\n(?= *\}\n *\} catch \(err\) \{\n)", re.MULTILINE), "insert-after",
+    _kbd_lines([
+        "if (kbdButtons?.length && i === chunks.length - 1) { const kbdOpenKey = chat_id + (sent.is_topic_message "
+        "&& sent.message_thread_id != null ? '#' + sent.message_thread_id : ''); if (marveenKbdOpen.size >= 1000 "
+        "&& !marveenKbdOpen.has(kbdOpenKey)) marveenKbdOpen.clear(); "
+        "marveenKbdOpen.set(kbdOpenKey, (marveenKbdOpen.get(kbdOpenKey) ?? new Set<number>()).add(sent.message_id)) }",
+    ]))
+KBD_TYPED = ("inbound typing indicator", re.compile(r"^( *)// Typing indicator[^\n]*\n", re.MULTILINE), "insert-before",
+    _kbd_lines([
+        "const kbdOpenKey = chat_id + (ctx.message?.is_topic_message && ctx.message.message_thread_id != null "
+        "? '#' + ctx.message.message_thread_id : '')",
+        "if (typeof ctx.message?.text === 'string' && marveenKbdOpen.has(kbdOpenKey)) {",
+        "  if (marveenKbdAnswered.size >= 1000) marveenKbdAnswered.clear()",
+        "  for (const kbdOpenId of marveenKbdOpen.get(kbdOpenKey)!) {",
+        "    marveenKbdAnswered.add(chat_id + ':' + kbdOpenId)",
+        "    void bot.api.editMessageReplyMarkup(chat_id, kbdOpenId, { reply_markup: { inline_keyboard: [] } }).catch(() => {})",
+        "  }",
+        "  marveenKbdOpen.delete(kbdOpenKey)",
+        "}",
+    ]))
+KBD_ANCHORS = [KBD_SCHEMA, KBD_CHECK, KBD_SEND, KBD_SET, KBD_CALLBACK, KBD_TS, KBD_OPEN, KBD_TYPED]
 KBD_PATCH = {"name": "kbd", "marker": KBD_MARKER, "anchors": KBD_ANCHORS, "mode": "insert-after",
-             "apply": lambda text: apply_kbd(text),  # defined below
+             "apply": lambda text, buttons=True: apply_kbd(text, buttons),  # defined below
              "fallback": "the reply tool has no buttons: a question goes out without them and is answered by typing"}
+
+# TELEGRAM_REPLY_BUTTONS off: an owner may not want answer buttons at all (owner request, 2026-11-03: no buttons
+# to anyone, from any agent). The same kbd patch with three lines different, so switching either way is the usual
+# rebuild in place (apply_kbd): the schema says the field sends nothing; the check keeps only an EMPTY list (it
+# still takes off a keyboard the first kbd version left under the input field), so a non-empty list sends no
+# reply_markup at all; and the tool result tells the agent that its buttons were dropped. Nothing is refused: the
+# message still goes out, with the options in its text. The callback branch, the Set and the open-question lines
+# stay, so a button sent before the switch still answers once and is taken off when the answer is typed.
+KBD_OFF_NOTE = ("buttons disabled on this install (TELEGRAM_REPLY_BUTTONS off): the message went out WITHOUT "
+                "buttons; ask in plain text and let the user type the answer")
+KBD_OFF_SCHEMA = (KBD_SCHEMA[0], KBD_SCHEMA[1], "insert-after",
+    "{indent}buttons: {{ type: 'array', items: {{ type: 'string' }}, description: 'Answer buttons are DISABLED on this "
+    "install (the owner decided against them): do not pass a non-empty list. If you do, the message is still sent, "
+    "WITHOUT buttons, and the result says so. Write the options into text and let the user type the answer. An empty "
+    "list only removes a keyboard left earlier under the input field.' }}, " + KBD_MARKER + "\n")
+KBD_OFF_CHECK = (KBD_CHECK[0], KBD_CHECK[1], "insert-after",
+    _kbd_lines([
+        "const kbdDropped = Array.isArray(args.buttons) && args.buttons.length > 0",
+        "const kbdButtons = args.buttons == null || kbdDropped ? undefined : Array.isArray(args.buttons) ? ([] as string[]) "
+        ": (() => { throw new Error('buttons: a list (answer buttons are disabled on this install)') })()",
+    ]))
+KBD_OFF_RESULT = ("reply result", re.compile(r"^( *)return \{ content: \[\{ type: 'text', text: result \}\] \}\n", re.MULTILINE),
+    "insert-before", _kbd_lines(["if (kbdDropped) return { content: [{ type: 'text', text: result + ' -- " + KBD_OFF_NOTE + "' }] }"]))
+KBD_OFF_ANCHORS = [KBD_OFF_SCHEMA, KBD_OFF_CHECK, KBD_SEND, KBD_SET, KBD_CALLBACK, KBD_TS, KBD_OPEN, KBD_TYPED, KBD_OFF_RESULT]
+KBD_OFF_PATCH = {**KBD_PATCH, "anchors": KBD_OFF_ANCHORS}
+
+# A forwarded or pasted text can carry characters a person cannot see but the
+# model reads (Unicode tag characters, "ASCII smuggling") or that reorder what
+# the reader sees (bidi controls). Exactly the Teams plugin's rule: walk the
+# text by code point and drop them, counting per class, so the meta says how
+# many went. Only the three RGI subdivision flags (England, Scotland, Wales)
+# stay whole; any other tag character is removed and counted. ZWJ, ZWNJ and the
+# variation selectors stay too, they carry meaning in visible text.
+# Four anchors, the first and third shared with evid and fwd: the const line
+# goes in before the channel notification (AFTER the evid line, so the evidence
+# log keeps the RAW text), the content spread overrides `content: text` (text
+# itself is never reassigned), the meta spread adds the invisible_* keys, and
+# the attachment_name line gets the same strip (its hidden characters are not counted).
+# No new import: only the language, over the handler's own `text`.
+INVIS_MARKER = "// MARVEEN-PATCH(invis1024): invisible characters stripped from inbound text"
+# One line of plain TypeScript Bun runs: __invisStrip(s) returns { text: <stripped>, meta: <counts> },
+# and __invis is that function applied to the inbound `text`.
+# Braces are doubled because apply_patch passes the insert through str.format.
+INVIS_COMPUTE = (
+    "const __invisStrip = (s: string) => {{ const cps = Array.from(s); "
+    "const n: Record<string, number> = {{ invisible_tag: 0, invisible_zwsp: 0, invisible_bidi: 0, invisible_bom: 0 }}; "
+    "const kept: string[] = []; "
+    "for (let i = 0; i < cps.length; i++) {{ const cp = cps[i].codePointAt(0)!; "
+    "if (cp === 0x1f3f4) {{ const rgi = [[0xe0067, 0xe0062, 0xe0065, 0xe006e, 0xe0067, 0xe007f], "
+    "[0xe0067, 0xe0062, 0xe0073, 0xe0063, 0xe0074, 0xe007f], "
+    "[0xe0067, 0xe0062, 0xe0077, 0xe006c, 0xe0073, 0xe007f]]; "
+    "if (rgi.some(seq => seq.every((c, k) => cps[i + 1 + k] != null && cps[i + 1 + k].codePointAt(0) === c))) "
+    "{{ kept.push(cps.slice(i, i + 7).join('')); i = i + 6; continue }} "
+    "kept.push(cps[i]); continue }} "
+    "if (cp >= 0xe0000 && cp <= 0xe007f) {{ n.invisible_tag++; continue }} "
+    "if (cp === 0x200b || (cp >= 0x2060 && cp <= 0x2064)) {{ n.invisible_zwsp++; continue }} "
+    "if (cp === 0xfeff) {{ n.invisible_bom++; continue }} "
+    "if ((cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069)) {{ n.invisible_bidi++; continue }} "
+    "kept.push(cps[i]) }} "
+    "const meta: Record<string, string> = {{}}; "
+    "for (const k of Object.keys(n)) if (n[k] > 0) meta[k] = String(n[k]); "
+    "return {{ text: kept.join(''), meta }} }}; "
+    "const __invis = __invisStrip(text); "
+)
+INVIS_CONTENT_ANCHOR = ("channel content", re.compile(r"^( *)content: text,\n", re.MULTILINE))
+INVIS_ATTACHMENT_ANCHOR = ("inbound meta attachment_name", re.compile(
+    r"^( *)\.\.\.\(attachment\.name \? \{ attachment_name: attachment\.name \} : \{\}\),\n", re.MULTILINE))
+
+# A status / done / summary message should be able to go out without a
+# notification sound (Bot API disable_notification). The reply tool gets an
+# optional `silent` boolean: schema field (after `files`), a check before
+# anything is sent, and the option on every text chunk. The file sends are the
+# catch: the topics patch (below, run AFTER the PATCHES) REPLACES the three-line
+# `const opts = reply_to != null ...` block, so this patch must touch neither
+# that block nor the two send-call lines. Instead it captures the outer `opts`
+# in replyFileOpts before the if, and declares a new `const opts` as the first
+# line inside the if / else blocks, which shadows the outer one (legal block
+# scoping) and adds disable_notification when silent.
+_SIL_OPTS = ("{indent}const opts = silentReply ? {{ ...replyFileOpts, disable_notification: true as const }} : "
+             "replyFileOpts " + SILENT_MARKER + "\n")
+SIL_SCHEMA = ("reply schema files property", KBD_SCHEMA[1], "insert-after",
+    "{indent}silent: {{ type: 'boolean', description: 'Optional. true sends without a notification sound (the message "
+    "still arrives and shows up in the chat). Use it for status, progress, done and summary messages that need nothing "
+    "from the user right now; leave it off for a question, a decision or anything urgent.' }}, " + SILENT_MARKER + "\n")
+SIL_CHECK = ("reply chat check", KBD_CHECK[1], "insert-after",
+    "{indent}const silentReply = args.silent === undefined ? false : typeof args.silent === 'boolean' ? args.silent : "
+    "(() => {{ throw new Error('silent: true or false') }})() " + SILENT_MARKER + "\n")
+SIL_SEND = ("reply send options", KBD_SEND[1], "insert-after",
+    "{indent}...(silentReply ? {{ disable_notification: true as const }} : {{}}), " + SILENT_MARKER + "\n")
+SIL_FILE_CAPTURE = ("reply file branch", re.compile(r"^( *)if \(PHOTO_EXTS\.has\(ext\)\) \{\n", re.MULTILINE),
+    "insert-before", "{indent}const replyFileOpts = opts " + SILENT_MARKER + "\n")
+SIL_PHOTO = ("reply photo send", re.compile(
+    r"^ *if \(PHOTO_EXTS\.has\(ext\)\) \{\n(?=( *)const sent = await bot\.api\.sendPhoto\(chat_id, input, opts\)\n)",
+    re.MULTILINE), "insert-after", _SIL_OPTS)
+SIL_DOC = ("reply document send", re.compile(
+    r"^ *\} else \{\n(?=( *)const sent = await bot\.api\.sendDocument\(chat_id, input, opts\)\n)",
+    re.MULTILINE), "insert-after", _SIL_OPTS)
 
 # Independent patches: each has its own marker and is all-or-nothing on its
 # own, so a plugin update that moves one anchor does not undo the other.
@@ -205,9 +362,28 @@ PATCHES = [
     {"name": "evid", "marker": EVID_MARKER, "anchors": [EVID_ANCHOR], "mode": "insert-before",
      "insert": EVID_INSERT,
      "fallback": "no inbound evidence is recorded, owner write commands are refused"},
+    {"name": "quote", "marker": QUOTE_MARKER, "anchors": [QUOTE_ANCHOR], "mode": "insert-before",
+     "insert": QUOTE_INSERT,
+     "fallback": "a quoted reply arrives without the quoted excerpt"},
     # an anchor may carry its own mode and insert (name, regex, mode, insert): the kbd lines differ.
     # "apply" replaces apply_patch for a patch that must also rebuild an older version of itself.
+    # silent shares three anchors with kbd and runs BEFORE it: apply_kbd strips and rebuilds its own
+    # lines right after each anchor, so a silent line inserted after kbd's would be reordered (and the
+    # file rewritten) on the next run. Placed first, both runs give the same text.
+    {"name": "silent", "marker": SILENT_MARKER,
+     "anchors": [SIL_SCHEMA, SIL_CHECK, SIL_SEND, SIL_FILE_CAPTURE, SIL_PHOTO, SIL_DOC], "mode": "insert-after",
+     "fallback": "the reply tool has no silent option: every reply plays the notification sound"},
     KBD_PATCH,
+    # the four invis lines differ too, and share two regexes with evid and fwd
+    {"name": "invis", "marker": INVIS_MARKER, "mode": "insert-after",
+     "anchors": [
+         ("channel notification", EVID_ANCHOR[1], "insert-before", "{indent}" + INVIS_COMPUTE + INVIS_MARKER + "\n"),
+         (*INVIS_CONTENT_ANCHOR, "insert-after", "{indent}...{{ content: __invis.text }}, " + INVIS_MARKER + "\n"),
+         ("inbound meta user_id", FWD_ANCHOR[1], "insert-after", "{indent}...__invis.meta, " + INVIS_MARKER + "\n"),
+         (*INVIS_ATTACHMENT_ANCHOR, "insert-after",
+          "{indent}...(attachment.name ? {{ attachment_name: __invisStrip(attachment.name).text }} : {{}}), " + INVIS_MARKER + "\n"),
+     ],
+     "fallback": "inbound text reaches the model with its invisible characters"},
 ]
 
 # Topics (TELEGRAM_TOPICS_ENABLED, default off). A private chat with topic mode
@@ -225,6 +401,7 @@ PATCHES = [
 TOPICS_TAG = "// MARVEEN-PATCH(tgtopics)"
 TOPICS_ORIG = "// MARVEEN-PATCH(tgtopics-orig) "
 TOPICS_SETTING = "TELEGRAM_TOPICS_ENABLED"
+BUTTONS_SETTING = "TELEGRAM_REPLY_BUTTONS"
 # The values src/config.ts reads as on; the Settings page itself writes "1".
 TRUTHY = ("1", "true", "yes", "on")
 # What JavaScript's String.prototype.trim() removes. Python's own strip() set
@@ -300,22 +477,23 @@ def strip_kbd(text):
     return "".join(line for line in text.splitlines(keepends=True) if not line.rstrip("\n").endswith(" " + KBD_MARKER))
 
 
-def apply_kbd(text):
+def apply_kbd(text, buttons=True):
     """Returns (new_text, status) like apply_patch, but a file that already carries kbd lines is not skipped:
-    the lines are taken out and rebuilt, so an older version (the reply keyboard) is replaced in place and
-    a current one comes out byte-identical ('already'). Status also: 'damaged:kbd markers' (a marker that is
-    not at the end of a line; the file is left alone)."""
+    the lines are taken out and rebuilt, so an older version (the reply keyboard), or the other side of the
+    TELEGRAM_REPLY_BUTTONS switch, is replaced in place and a current one comes out byte-identical ('already').
+    Status also: 'damaged:kbd markers' (a marker that is not at the end of a line; the file is left alone)."""
+    patch = KBD_PATCH if buttons else KBD_OFF_PATCH
     if KBD_MARKER not in text:
-        return apply_patch(text, KBD_PATCH)
+        return apply_patch(text, patch)
     base = strip_kbd(text)
     if KBD_MARKER in base:
         return text, "damaged:kbd markers"
-    new, status = apply_patch(base, KBD_PATCH)
+    new, status = apply_patch(base, patch)
     if status != "patched":
         return text, status  # the old lines stay: they still work
     if new == text:
         return text, "already"
-    log("kbd lines of an older or edited version replaced")
+    log("kbd lines rebuilt (an older or edited version, or the other side of TELEGRAM_REPLY_BUTTONS)")
     return new, "patched"
 
 
@@ -356,12 +534,13 @@ def remove_topics(text):
 TOPICS_PATCH = {"name": "topics", "fallback": TOPICS_FALLBACK}
 
 
-def patch_text(text, topics=False):
+def patch_text(text, topics=False, buttons=True):
     """Returns (new_text, [(patch, status), ...]). The topics entry is there
-    when the switch is on, or when switching it off took the patch out."""
+    when the switch is on, or when switching it off took the patch out.
+    `buttons` picks the side of the kbd patch (TELEGRAM_REPLY_BUTTONS)."""
     results = []
     for patch in PATCHES:
-        text, status = patch["apply"](text) if "apply" in patch else apply_patch(text, patch)
+        text, status = patch["apply"](text, buttons) if "apply" in patch else apply_patch(text, patch)
         results.append((patch, status))
     if topics:
         text, status = apply_topics(text)
@@ -384,7 +563,7 @@ def file_status(results):
     return next(st for st in statuses if st.startswith(("anchor-missing", "damaged")))
 
 
-def patch_file(path, topics=False):
+def patch_file(path, topics=False, buttons=True):
     """Returns (file status, {patch name: status})."""
     try:
         with open(path, encoding="utf-8") as f:
@@ -392,7 +571,7 @@ def patch_file(path, topics=False):
     except Exception as e:
         log(f"cannot read {path}: {type(e).__name__}")
         return "unreadable", {}
-    new, results = patch_text(text, topics)
+    new, results = patch_text(text, topics, buttons)
     per_patch = {p["name"]: st for p, st in results}
     for patch, status in results:
         if status.startswith("anchor-missing"):
@@ -463,14 +642,14 @@ def is_on(value):
     return str(value).strip(JS_TRIM).lower() in TRUTHY
 
 
-def topics_setting(install_dir):
-    """TELEGRAM_TOPICS_ENABLED as the dashboard settings store resolves it:
-    store/config-overrides.json, then .env, then the registry default (off)."""
+def flag_setting(install_dir, key, default):
+    """A boolean setting as the dashboard settings store resolves it:
+    store/config-overrides.json, then .env, then the registry default."""
     try:
         with open(os.path.join(install_dir, "store", "config-overrides.json"), encoding="utf-8") as f:
             overrides = json.load(f)
-        if isinstance(overrides, dict) and TOPICS_SETTING in overrides:
-            return is_on(overrides[TOPICS_SETTING])
+        if isinstance(overrides, dict) and key in overrides:
+            return is_on(overrides[key])
     except Exception:
         pass
     try:
@@ -479,30 +658,46 @@ def topics_setting(install_dir):
         # instead of failing the whole file.
         with open(os.path.join(install_dir, ".env"), encoding="utf-8", errors="replace", newline="") as f:
             env = parse_env_content(f.read())
-        if TOPICS_SETTING in env:
-            return is_on(env[TOPICS_SETTING])
+        if key in env:
+            return is_on(env[key])
     except Exception:
         pass
-    return False
+    return default
+
+
+def topics_setting(install_dir):
+    """TELEGRAM_TOPICS_ENABLED, registry default off."""
+    return flag_setting(install_dir, TOPICS_SETTING, False)
+
+
+def buttons_setting(install_dir):
+    """TELEGRAM_REPLY_BUTTONS, registry default on (the answer buttons as they are)."""
+    return flag_setting(install_dir, BUTTONS_SETTING, True)
 
 
 def main(argv):
     args = argv[1:]
     state_path = None
     topics = None
-    while len(args) >= 2 and args[0] in ("--state", "--topics"):
+    buttons = None
+    while len(args) >= 2 and args[0] in ("--state", "--topics", "--buttons"):
         if args[0] == "--state":
             state_path = args[1]
-        elif args[1] in ("on", "off"):
+        elif args[1] not in ("on", "off"):
+            # An explicit switch: anything else is a typo, and reading it as
+            # "off" would silently take a patch off (or the buttons away).
+            print(f"patch-telegram-plugin.py: {args[0]} takes on or off, got {args[1]!r}; nothing patched", file=sys.stderr)
+            return 2
+        elif args[0] == "--topics":
             topics = args[1] == "on"
         else:
-            # An explicit switch: anything else is a typo, and reading it as
-            # "off" would silently take the topics patch off.
-            print(f"patch-telegram-plugin.py: --topics takes on or off, got {args[1]!r}; nothing patched", file=sys.stderr)
-            return 2
+            buttons = args[1] == "on"
         args = args[2:]
+    install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if topics is None:
-        topics = topics_setting(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        topics = topics_setting(install_dir)
+    if buttons is None:
+        buttons = buttons_setting(install_dir)
     root = args[0] if args else default_root()
     files = []
     base = os.path.join(root, "claude-plugins-official", "telegram")
@@ -510,17 +705,18 @@ def main(argv):
         for ver in sorted(os.listdir(base)):
             path = os.path.join(base, ver, "server.ts")
             if os.path.isfile(path):
-                status, patches = patch_file(path, topics)
+                status, patches = patch_file(path, topics, buttons)
                 files.append({"version": ver, "path": path, "status": status, "patches": patches})
     if state_path:
-        write_state(state_path, {"at": int(time.time()), "root": root, "topics": "on" if topics else "off", "files": files})
+        write_state(state_path, {"at": int(time.time()), "root": root, "topics": "on" if topics else "off",
+                                 "buttons": "on" if buttons else "off", "files": files})
     return 0
 
 
 if __name__ == "__main__":
     code = 0
     try:
-        # Non-zero only for a mistyped --topics, which channels.sh never passes.
+        # Non-zero only for a mistyped --topics or --buttons, which channels.sh never passes.
         code = main(sys.argv)
     except Exception as e:  # never stop the channel from starting
         log(f"unexpected {type(e).__name__}, nothing patched")

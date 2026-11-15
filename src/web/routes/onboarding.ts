@@ -17,8 +17,10 @@ import {
   createMainChannelsSession,
 } from '../channel-monitor.js'
 import { liveProbeAuth, stampTokenVerified } from '../claude-credentials-guard.js'
-import { json, readBody } from '../http-helpers.js'
+import { json, readBodyOrRefuse } from '../http-helpers.js'
 import { isManagedSettingsReady, getManagedSettingsSudoCommand } from './agents.js'
+import { mayActAsOwner, mayActAsOwnerOrFirstRun, refuseOwner, OWNER_SESSION_REQUIRED } from './auth.js'
+import { assertEnvEntry } from '../../env.js'
 import type { RouteContext } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -120,6 +122,27 @@ async function runningSessionAuthenticated(): Promise<boolean> {
   } catch { return false }
 }
 
+// OWNERGATE4-1104 (review, Samu 69637): the condition of the 'onboarding-claude-auth' first-run pass. True only when
+// claudeAuthPresent finds no credential (no CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY in .env, no fleet token file,
+// no credential in ~/.claude/.credentials.json, no Keychain entry, no token in the running session) AND none of the
+// three files it reads exists while being unreadable (or, for credentials.json, not JSON). claudeAuthPresent treats
+// such a file as absent; here it counts as a stored credential (fail closed: the strict gate applies).
+async function noClaudeCredentialYet(): Promise<boolean> {
+  for (const file of [ENV_FILE, FLEET_TOKEN_FILE, HOME_CREDENTIALS]) {
+    let raw: string
+    try {
+      raw = readFileSync(file, 'utf-8')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue
+      return false
+    }
+    if (file === HOME_CREDENTIALS && raw.trim()) {
+      try { JSON.parse(raw) } catch { return false }
+    }
+  }
+  return !(await claudeAuthPresent())
+}
+
 async function claudeAuthPresent(): Promise<boolean> {
   if (readEnvValue('CLAUDE_CODE_OAUTH_TOKEN')) return true
   if (readEnvValue('ANTHROPIC_API_KEY')) return true
@@ -194,6 +217,7 @@ function agentsRunning(): boolean {
 // Atomic, idempotent .env update for one key: drop any prior line for the key,
 // keep every other line verbatim, append the new value, chmod 600. Never sed.
 function setEnvKey(key: string, value: string): void {
+  assertEnvEntry(key, value)
   let lines: string[] = []
   try { lines = readFileSync(ENV_FILE, 'utf-8').split('\n') } catch { /* fresh .env */ }
   const kept = lines.filter((l) => l.length > 0 && !l.startsWith(key + '='))
@@ -314,8 +338,19 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
   // no-implicit-restart-of-a-working-fleet behaviour and reports
   // restartNeeded instead.
   if (path === '/api/onboarding/identity' && method === 'POST') {
+    // OWNERGATE3-1104: writes OWNER_NAME / BOT_NAME / BRAND_NAME into .env and renames the owner and the agent inside
+    // the main agent's CLAUDE.md and SOUL.md (who the agent believes its owner is), and may restart the channels
+    // session; owner-only, before the body is read. The first-run wizard runs before the first dashboard login
+    // exists, and there the bare token still passes (the first-run setup, OWNERGATE4-1104, FIRST_RUN_PATHS
+    // 'onboarding-identity'), as for claude-auth below.
+    if (!mayActAsOwnerOrFirstRun(ctx.auth, req, 'onboarding-identity')) {
+      json(res, { ...OWNER_SESSION_REQUIRED, error: 'Changing the owner and agent names needs the dashboard login (an owner session).' }, 403)
+      return true
+    }
     let body: { agentName?: string; ownerName?: string } = {}
-    try { body = JSON.parse((await readBody(req)).toString()) as typeof body } catch { /* empty */ }
+    const raw = await readBodyOrRefuse(req, res)
+    if (!raw) return true
+    try { body = JSON.parse(raw.toString()) as typeof body } catch { /* empty */ }
     const agentName = (body.agentName ?? '').trim()
     const ownerName = (body.ownerName ?? '').trim()
     if (!agentName || !ownerName) { json(res, { error: 'agentName es ownerName szukseges.', reason: 'missing' }, 400); return true }
@@ -385,13 +420,29 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
   // Store a Claude setup-token (OAuth) or API key. The value is NEVER logged or
   // echoed back -- only { ok, verified }. Zero owner/access-config clobber.
   if (path === '/api/onboarding/claude-auth' && method === 'POST') {
+    // It replaces the credential the whole fleet runs on, so the shared
+    // dashboard token alone is not enough once a dashboard login exists
+    // (the first-run wizard runs before that, and is unaffected: OWNERGATE4-1104, FIRST_RUN_PATHS
+    // 'onboarding-claude-auth').
+    // OWNERGATE4-1104 (review, Samu 69637): the first-run pass only while no Claude credential is stored yet
+    // (noClaudeCredentialYet: none of the places claudeAuthPresent reads, and none of them unreadable). Once one
+    // exists, replacing it is the owner gate: the bare shared token cannot swap the credential the fleet runs on.
+    const firstCredential = await noClaudeCredentialYet()
+    if (!(firstCredential ? mayActAsOwnerOrFirstRun(ctx.auth, req, 'onboarding-claude-auth') : mayActAsOwner(ctx.auth, req))) {
+      refuseOwner(res, OWNER_SESSION_REQUIRED.error)
+      return true
+    }
     let body: { token?: string; apiKey?: string } = {}
-    try { body = JSON.parse((await readBody(req)).toString()) as typeof body } catch { /* empty */ }
+    const raw = await readBodyOrRefuse(req, res)
+    if (!raw) return true
+    try { body = JSON.parse(raw.toString()) as typeof body } catch { /* empty */ }
     const token = (body.token ?? '').trim()
     const apiKey = (body.apiKey ?? '').trim()
     if (!token && !apiKey) { json(res, { error: 'token vagy apiKey szukseges.', reason: 'missing' }, 400); return true }
     if (token && !/^sk-ant-oat/.test(token)) { json(res, { error: 'A setup-token formatuma nem stimmel (sk-ant-oat...).', reason: 'bad-token' }, 400); return true }
     if (apiKey && !/^sk-ant-/.test(apiKey)) { json(res, { error: 'Az API-kulcs formatuma nem stimmel (sk-ant-...).', reason: 'bad-key' }, 400); return true }
+    // One line only: .env is line-based (ENVINJECT1028). Refused before the live probe and any write.
+    if (/[\r\n\0]/.test(token + apiKey)) { json(res, { error: 'A token/kulcs nem tartalmazhat sortorest.', reason: token ? 'bad-token' : 'bad-key' }, 400); return true }
 
     // Read BEFORE persisting: on a fresh install the channels session is
     // booted by the installer/service unit with NO credentials, so if the

@@ -56,6 +56,10 @@ const REGISTRATION_SURFACES = [...SEEDING_SURFACES, ...CHECKOUT_SURFACES]
 // name -> why it is allowed to be unregistered. Keep every reason concrete;
 // "misc" entries defeat the lint.
 const EXEMPT: Record<string, string> = {
+  'mcp-file-targets.mjs':
+    'shared library (MCPWRITEGATE1104): names the local paths of an MCP tool call, imported by db-write-gate.mjs and self-pace-gate.mjs; not itself a hook',
+  'py-inline-data.py':
+    'helper run by db-write-gate.mjs (pythonDataVerdict, /usr/bin/python3 -I -S) to decide whether a Bash command\'s python code is data (INSTRFILES1104 A); not itself a hook',
   'ledger_lib.py':
     'shared library imported by the ledger hooks; not itself a hook',
   'command_prompt.py':
@@ -64,8 +68,12 @@ const EXEMPT: Record<string, string> = {
     'shared library imported by hooks to record a swallowed failure in store/hook-errors.log (SILENTOLLAMA926); not itself a hook',
   'clearstate_lib.py':
     'shared library imported by clear-capture.py / clear-replay.py; not itself a hook',
+  'shell_rescan_lib.py':
+    'shared library: the detector imported by shell-rescan-guard.py; not itself a hook',
   'memory_frontmatter_lib.py':
     'shared library: the one memory-frontmatter check, imported by memory-frontmatter-gate.py (Write/Edit) and memory-frontmatter-bash-gate.py (Bash, KAPUEGYUT918); not itself a hook',
+  'hook_switches.py':
+    'shared library (HOOKDRIFT926): MARVEEN_DISABLED_HOOKS + stdin size cap, imported by tool-log-capture.py and read by scripts/hook-metadata.py; not itself a hook',
   'email_extract.py':
     'shared library imported by outgoing-copy-gate.py (and the level-2 email approval gate, EMAILKAPU901 PR2); not itself a hook',
   'recipient_ledger.py':

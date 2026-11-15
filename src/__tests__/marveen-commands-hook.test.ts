@@ -10,16 +10,25 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { AddressInfo } from 'node:net'
+import { safeRmTmp } from './helpers/safe-rm-tmp.js'
 import { clearCommandsForTest, listCommands } from '../web/commands.js'
 import { registerBuiltinCommands } from '../web/builtin-commands.js'
 import Database from 'better-sqlite3'
 
 const ROOT = join(__dirname, '..', '..')
 const HOOK = join(ROOT, 'scripts', 'hooks', 'marveen-commands.py')
+// ENVRELAXGATE1104: ledger_lib takes its DB only from the install the hook lives
+// in (<install>/store/claudeclaw.db), never from the environment. So the hook is
+// spawned from a tmp install whose scripts/ links to this repo's; its store/ is
+// the ledger every spawn writes, off the checkout's own store.
+const LEDGER_ROOT = mkdtempSync(join(tmpdir(), 'mcmd-ledger-'))
+mkdirSync(join(LEDGER_ROOT, 'store'))
+symlinkSync(join(ROOT, 'scripts'), join(LEDGER_ROOT, 'scripts'))
+const RUN_HOOK = join(LEDGER_ROOT, 'scripts', 'hooks', 'marveen-commands.py')
 
 interface Call { path: string; body: any }
 let calls: Call[] = []
@@ -33,6 +42,7 @@ let base = ''
 let install = ''
 let stateDir = ''
 let ledgerDb = ''
+let ledgerDir = ''
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
@@ -67,7 +77,7 @@ beforeAll(async () => {
       res.end(JSON.stringify({ ok: true, result: (req.url ?? '').endsWith('/sendMessage') ? { message_id: 555 } : {} }))
     })
   })
-  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  await new Promise<void>((r, reject) => { server.on('error', reject); server.listen(0, '127.0.0.1', r) })
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
 
   install = mkdtempSync(join(tmpdir(), 'mcmd-install-'))
@@ -79,20 +89,18 @@ beforeAll(async () => {
     'import json\nprint(json.dumps({"claude": {"ok": True, "windows": {"five_hour": {"used_percent": 30, "resets_at": 0}}}}))\n')
   stateDir = mkdtempSync(join(tmpdir(), 'mcmd-state-'))
   writeFileSync(join(stateDir, '.env'), 'TELEGRAM_BOT_TOKEN=bot-tok\n')
-  // Isolates the conversation-continuity ledger from the worktree's own
-  // store/claudeclaw.db -- ledger_lib.db_path() resolves from THIS repo
-  // checkout's own scripts/hooks/ dir (not from MARVEEN_INSTALL_DIR), so
-  // without this override every hook spawn here would write real rows into
-  // the checkout's live store (gitignored, but still cross-run shared state).
-  ledgerDb = join(mkdtempSync(join(tmpdir(), 'mcmd-ledger-')), 'claudeclaw.db')
+  // The conversation-continuity ledger: ledger_lib.db_path() resolves from the
+  // hook's own install (not from MARVEEN_INSTALL_DIR), i.e. LEDGER_ROOT above.
+  ledgerDir = LEDGER_ROOT
+  ledgerDb = join(LEDGER_ROOT, 'store', 'claudeclaw.db')
 })
 
 afterAll(() => {
-  server.closeAllConnections()
-  server.close()
-  rmSync(install, { recursive: true, force: true })
-  rmSync(stateDir, { recursive: true, force: true })
-  rmSync(join(ledgerDb, '..'), { recursive: true, force: true })
+  server?.closeAllConnections()
+  server?.close()
+  // Each variable is '' if beforeAll failed early; join('', '..') === '..' used
+  // to delete the parent of the cwd here, so only non-empty temp dirs are removed.
+  for (const d of [install, stateDir, ledgerDir]) if (d) safeRmTmp(d)
 })
 
 beforeEach(() => {
@@ -107,7 +115,7 @@ function channel(body: string, attrs = 'source="plugin:telegram:telegram" chat_i
   return `<channel ${attrs}>${body}</channel>`
 }
 
-function runHook(prompt: string, apiBase = base, agent = 'marveen', args: string[] = [], extraEnv: Record<string, string> = {}, entry: string[] = [HOOK]): Promise<{ code: number | null; stdout: string }> {
+function runHook(prompt: string, apiBase = base, agent = 'marveen', args: string[] = [], extraEnv: Record<string, string> = {}, entry: string[] = [RUN_HOOK]): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve) => {
     const p = spawn('python3', [...entry, ...args], {
       env: {
@@ -118,7 +126,6 @@ function runHook(prompt: string, apiBase = base, agent = 'marveen', args: string
         TELEGRAM_STATE_DIR: stateDir,
         MARVEEN_API_BASE: apiBase,
         TELEGRAM_API_BASE: base,
-        LEDGER_DB_PATH: ledgerDb,
         MARVEEN_CMD_SEND_RETRY_SECONDS: '0.01',
         ...extraEnv,
       },
@@ -135,7 +142,7 @@ const sends = () => calls.filter(c => c.path === '/botbot-tok/sendMessage').map(
 // The hook run as itself, but with a Python that does not exist for the
 // deferred watcher: its Popen fails, which is the hook's "deferred spawn failed"
 // branch, with no change to the hook.
-const HOOK_WITHOUT_DEFERRED_SPAWN = ['-c', 'import runpy, sys\nsys.executable = "/nonexistent/python3"\nsys.argv = sys.argv[1:]\nrunpy.run_path(sys.argv[0], run_name="__main__")', HOOK]
+const HOOK_WITHOUT_DEFERRED_SPAWN = ['-c', 'import runpy, sys\nsys.executable = "/nonexistent/python3"\nsys.argv = sys.argv[1:]\nrunpy.run_path(sys.argv[0], run_name="__main__")', RUN_HOOK]
 
 // FLAKYCMDLOG1006: the log is SHARED by every test in this file (one stateDir,
 // beforeAll), and a deferred write's detached watcher writes its closing
@@ -578,8 +585,8 @@ describe('marveen-commands.py', () => {
 describe('marveen-commands.py --stop', () => {
   function runStop(agent = 'marveen'): Promise<number | null> {
     return new Promise((resolve) => {
-      const p = spawn('python3', [HOOK, '--stop'], {
-        env: { ...process.env, MARVEEN_INSTALL_DIR: install, MAIN_AGENT_ID: 'marveen', MARVEEN_AGENT_ID: agent, TELEGRAM_STATE_DIR: stateDir, MARVEEN_API_BASE: base, LEDGER_DB_PATH: ledgerDb },
+      const p = spawn('python3', [RUN_HOOK, '--stop'], {
+        env: { ...process.env, MARVEEN_INSTALL_DIR: install, MAIN_AGENT_ID: 'marveen', MARVEEN_AGENT_ID: agent, TELEGRAM_STATE_DIR: stateDir, MARVEEN_API_BASE: base },
       })
       p.on('close', code => resolve(code))
       p.stdin.end(JSON.stringify({ session_id: 'sid-1', hook_event_name: 'Stop' }))

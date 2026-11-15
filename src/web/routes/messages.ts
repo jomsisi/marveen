@@ -2,7 +2,7 @@ import {
   createAgentMessage, getPendingMessages, listAgentMessages, getRecipientQueueState,
   getAgentConversation, getAgentConversationThreads,
   getKanbanSeqByIdPrefix,
-  markMessageDone, closeOpenMessage, getAgentMessage,
+  markMessageDone, closeOpenMessage, closeMessageAsRecipient, getAgentMessage,
   closeOtelSpan,
   getPendingBacklogByAgent,
   countNewerMessagesForRows,
@@ -26,8 +26,12 @@ import { verifyHeartbeatKanban, HEARTBEAT_KANBAN_WINDOW_SEC } from '../heartbeat
 import { buildFreshnessInfo, type MessageFreshness } from '../agent-message-wrap.js'
 import { parseQualifiedId, formatQualifiedId, isQualifiedId } from '../federation/address.js'
 import { getFederationConfig } from '../federation/config.js'
+import { containsPrivateData } from '../federation/capabilities.js'
+import { FEDERATION_MAX_CONTENT_BYTES } from '../federation/bridge.js'
+import { findSensitiveShape, truncateUtf8, type SensitiveShape } from '../federation/outbound-scrub.js'
 import { decidePriority, parsePriorityField } from '../message-priority.js'
 import { rankedSenders } from '../../delivery-order.js'
+import { validateAffectsCurrentWork } from '../unblocks-interrupt.js'
 import type { RouteContext } from './types.js'
 
 // A VOICE_CHANNEL_ID that is not a usable agent id was replaced by the default in
@@ -72,6 +76,77 @@ export function shouldNotifyDelegator(fromAgent: string, toAgent: string, conten
   if (!isKnownAgent(fromAgent)) return false
   if (content.startsWith(COMPLETION_REPORT_PREFIX)) return false
   return true
+}
+
+/**
+ * The completion receipt for a FEDERATED sender ("<system>/<agent>"), or why none is sent.
+ *
+ * shouldNotifyDelegator refuses such a sender (no local agent directory), so until this
+ * existed a peer's task closed here with a result never reached the peer: measured
+ * 2026-10-15, a peer answered our status question by closing it, and the answer was lost
+ * on both sides while the sender saw only `delivered`. The receipt is an ordinary
+ * qualified-recipient row, so the bridge delivers it like any other outbound message.
+ *
+ * OPT-IN: the receipt publishes the result to ANOTHER system, so closing a task never does
+ * that by itself. The closer asks for it with `"federated_receipt": true` (a JSON boolean)
+ * in the PUT body; without it the answer says `not-requested` and the result stays here.
+ * The local receipt is a different matter (it never leaves the machine) and keeps its default.
+ *
+ * Even when asked for, it is stricter than the local receipt, because it leaves the machine:
+ *   - no result, no receipt: the bridge carries no content-free acknowledgements;
+ *   - `notify: false` wins over the opt-in (`notify-false`): the closer said "no receipt";
+ *   - the result goes through the deterministic private-data scrub of the manifest (owner
+ *     name, chat id, this install's tokens, internal system names) AND the shape scrub
+ *     (findSensitiveShape: private keys, vendor/bearer/JWT/long hex/opaque tokens, home
+ *     paths, e-mail addresses, phone numbers). A hit WITHHOLDS the receipt -- it is not
+ *     redacted, since a half-scrubbed answer reads as a whole one -- and the reason names
+ *     the category, never the matched text;
+ *   - a receipt is never answered with a receipt (the [Eredmény] prefix), so the two
+ *     systems cannot ping-pong -- and an older peer refuses it anyway (qualified sender);
+ *   - an oversized result is cut on a code-point boundary (truncateUtf8), never mid-character.
+ * The header names the PEER's message id (remote_ref), not ours: ours means nothing there.
+ * Skips are returned, not swallowed: the PUT answer reports them, so the closer learns it
+ * has to send the answer as a separate message instead.
+ */
+export type FederatedReceiptSkip =
+  | 'not-requested' | 'notify-false'
+  | 'empty-result' | 'completion-report' | 'federation-disabled' | 'unknown-peer' | 'private-data'
+  | SensitiveShape
+
+export type FederatedReceipt =
+  | { send: true; content: string }
+  | { send: false; reason: FederatedReceiptSkip }
+
+export function federatedReceipt(
+  done: Pick<AgentMessage, 'id' | 'from_agent' | 'content' | 'remote_ref'>,
+  status: string,
+  result: string | undefined | null,
+  opts: { requested: boolean; notify?: boolean | null } = { requested: false },
+): FederatedReceipt | null {
+  const sender = parseQualifiedId(done.from_agent)
+  if (!sender) return null
+  if (!opts.requested) return { send: false, reason: 'not-requested' }
+  if (opts.notify === false) return { send: false, reason: 'notify-false' }
+  if (done.content.startsWith(COMPLETION_REPORT_PREFIX)) return { send: false, reason: 'completion-report' }
+  const text = (result ?? '').trim()
+  if (!text) return { send: false, reason: 'empty-result' }
+  const cfg = getFederationConfig()
+  if (!cfg.enabled) return { send: false, reason: 'federation-disabled' }
+  if (!cfg.peers.some((p) => p.id === sender.system.toLowerCase())) return { send: false, reason: 'unknown-peer' }
+  if (containsPrivateData(text)) return { send: false, reason: 'private-data' }
+  const shape = findSensitiveShape(text)
+  if (shape) return { send: false, reason: shape.shape }
+  // The ref is peer-supplied: keep it to a plain id so it cannot reshape the header line.
+  const ref = (done.remote_ref ?? '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+  const header = ref
+    ? `${COMPLETION_REPORT_PREFIX} msg_id:${ref} status:${status}`
+    : `${COMPLETION_REPORT_PREFIX} msg_id:ismeretlen status:${status} (nálunk msg ${done.id})`
+  // The peer cannot follow a local "read the rest" pointer, so the whole result goes, up to
+  // what the bridge accepts; only a result larger than that is cut, and the cut says so.
+  const cutNote = '\n... [levágva: a teljes eredmény nem fér át a hídon]'
+  const budget = FEDERATION_MAX_CONTENT_BYTES - Buffer.byteLength(`${header}\n\n${cutNote}`, 'utf8')
+  const body = Buffer.byteLength(text, 'utf8') > budget ? truncateUtf8(text, budget) + cutNote : text
+  return { send: true, content: `${header}\n\n${body}` }
 }
 
 /** The result a voice-channel answer is closed with: it is read by the relay, never delivered. */
@@ -179,8 +254,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
-    const { from, to, content, origin_note, priority, urgent } = JSON.parse(body.toString()) as
-      { from: string; to: string; content: string; origin_note?: string; priority?: unknown; urgent?: unknown }
+    const { from, to, content, origin_note, priority, urgent, affects_current_work } = JSON.parse(body.toString()) as
+      { from: string; to: string; content: string; origin_note?: string; priority?: unknown; urgent?: unknown; affects_current_work?: unknown }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
       return true
@@ -198,6 +273,21 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     if (urgent === true && !mayMarkUrgent(ctx.auth, URGENT_DEVICE_KEY_IDS)) {
       logger.warn({ from: from.trim(), to: to.trim(), authKind: ctx.auth?.kind ?? 'none', deviceId: ctx.auth?.deviceId }, 'Rejected /api/messages POST: urgent without a listed device key')
       json(res, { error: 'urgent delivery requires a device key listed in MESSAGE_URGENT_DEVICE_IDS; the shared dashboard token (the agent API) cannot send an urgent row' }, 403)
+      return true
+    }
+    // UNBLOCKS925: the optional, named exception to "wait for an idle pane". One value, set by the main agent
+    // alone, never inferred from the text; anything else is a loud 400 so a typo does not send an ordinary row.
+    // It reaches a busy pane exactly as an urgent row does, so it sits behind the SAME key: a second route around
+    // the urgent gate is what the gate exists to prevent. The sender name in the body is self-declared, so the key,
+    // not the name, is what authenticates the request.
+    const affects = validateAffectsCurrentWork(affects_current_work, from.trim(), MAIN_AGENT_ID)
+    if (!affects.ok) {
+      json(res, { error: affects.error }, 400)
+      return true
+    }
+    if (affects.value !== null && !mayMarkUrgent(ctx.auth, URGENT_DEVICE_KEY_IDS)) {
+      logger.warn({ from: from.trim(), to: to.trim(), authKind: ctx.auth?.kind ?? 'none', deviceId: ctx.auth?.deviceId }, 'Rejected /api/messages POST: affects_current_work without a listed device key')
+      json(res, { error: 'affects_current_work requires a device key listed in MESSAGE_URGENT_DEVICE_IDS, the same key as urgent delivery; the shared dashboard token (the agent API) cannot set it' }, 403)
       return true
     }
     // HBTEMPLATELEAK1002: a heartbeat report that still carries its template's
@@ -455,7 +545,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       : rankedSenders().includes(from.trim())
         ? { priority: parsedPriority.level === 'high' ? 1 as const : 0 as const, downgraded: false }
         : decidePriority(parsedPriority.level, from.trim(), storedTo, Math.floor(Date.now() / 1000))
-    const msg = createAgentMessage(from.trim(), storedTo, normalizedContent, trimmedOriginNote, null, { urgent: urgent === true, priority: decided.priority })
+    const msg = createAgentMessage(from.trim(), storedTo, normalizedContent, trimmedOriginNote, null, { urgent: urgent === true, priority: decided.priority, affectsCurrentWork: affects.value })
     if (isVoiceMailbox) {
       markMessageDone(msg.id, VOICE_MAILBOX_RESULT)
       logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent }, 'Voice-channel answer stored in the mailbox (no session delivery)')
@@ -636,8 +726,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   if (msgUpdateMatch && method === 'PUT') {
     const id = parseInt(msgUpdateMatch[1], 10)
     const body = await readBody(req)
-    const { status: newStatus, result, notify } = JSON.parse(body.toString()) as
-      { status: string; result?: string; notify?: boolean }
+    const { status: newStatus, result, notify, federated_receipt: federatedReceiptFlag } = JSON.parse(body.toString()) as
+      { status: string; result?: string; notify?: boolean; federated_receipt?: boolean }
 
     // `notify` lets the CLOSER decide whether the reverse [Eredmény] message is
     // worth an agent turn at the other end. The two cases share this one code
@@ -660,6 +750,17 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       }, 400)
       return true
     }
+    // `federated_receipt` is the closer's explicit consent to send the result to a FEDERATED
+    // sender's system (see federatedReceipt). Same rule as `notify`, for the same reason: a
+    // string "true"/"false" is rejected before the status write, not coerced -- consent to
+    // publish outside the machine must not come from a truthy accident.
+    if (federatedReceiptFlag !== undefined && federatedReceiptFlag !== null && typeof federatedReceiptFlag !== 'boolean') {
+      json(res, {
+        error: 'federated_receipt must be a boolean',
+        hint: 'omit it (no result goes to a federated sender), or send JSON true to send it back over the bridge -- not a string',
+      }, 400)
+      return true
+    }
 
     // Only an OPEN message is closed here (closeOpenMessage checks and writes in one
     // UPDATE). A second close of a done/failed row is refused with 409 and changes
@@ -668,7 +769,30 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // recipient. A repeated PUT after a client timeout gets the same 409; the first
     // close already took effect.
     let ok = false
-    if (newStatus === 'done' || newStatus === 'failed') {
+    // A sub-agent's own token (ctx.auth.tokenAgent) may only close a still-open
+    // message addressed to itself, and that is enforced in the UPDATE
+    // (closeMessageAsRecipient), not by the gate's earlier lookup. 0 rows means
+    // no close and no completion report. The shared token is unchanged.
+    const agentCaller = ctx.auth?.kind === 'token' ? ctx.auth.tokenAgent : undefined
+    if (agentCaller && (newStatus === 'done' || newStatus === 'failed')) {
+      if (!closeMessageAsRecipient(id, agentCaller, newStatus, result)) {
+        const row = getAgentMessage(id)
+        if (row && row.to_agent === agentCaller) {
+          json(res, {
+            error: 'Message already closed',
+            status: row.status,
+            hint: 'the first close already took effect; nothing was changed and no completion report was sent',
+          }, 409)
+        } else {
+          json(res, {
+            error: `identity binding: message ${id} is not addressed to the calling agent '${agentCaller}'. A sub-agent token closes only its own messages; ask ${MAIN_AGENT_ID} via /api/messages for anything else`,
+            rule: 'agent-identity-binding', agent: agentCaller, main_agent: MAIN_AGENT_ID,
+          }, 403)
+        }
+        return true
+      }
+      ok = true
+    } else if (newStatus === 'done' || newStatus === 'failed') {
       ok = closeOpenMessage(id, newStatus, result)
       if (!ok) {
         const current = getAgentMessage(id)
@@ -704,7 +828,19 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
           `${COMPLETION_REPORT_PREFIX} msg_id:${id} status:${newStatus}\n\n${summary}`,
         )
       }
-      json(res, { ok: true }); return true
+      // A federated sender: see federatedReceipt (opt-in). The outcome rides on the answer, so
+      // a skipped or withheld receipt is never silent to the closer. A plain notify:false
+      // without the opt-in keeps the plain answer, as before.
+      const receipt = done && (notify !== false || federatedReceiptFlag === true)
+        ? federatedReceipt(done, newStatus, result, { requested: federatedReceiptFlag === true, notify })
+        : null
+      if (done && receipt?.send === true) {
+        createAgentMessage(done.to_agent, done.from_agent, receipt.content)
+        logger.info({ id, to: done.from_agent }, 'Federated completion receipt queued')
+      } else if (receipt?.send === false) {
+        logger.info({ id, to: done?.from_agent, reason: receipt.reason }, 'Federated completion receipt not sent')
+      }
+      json(res, receipt ? { ok: true, federatedReceipt: receipt.send ? 'queued' : receipt.reason } : { ok: true }); return true
     }
     json(res, { error: 'Message not found or invalid status' }, 404)
     return true

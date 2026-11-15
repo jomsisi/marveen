@@ -104,7 +104,8 @@ describe('operatorGateDecision over every enumerated /api path', () => {
 describe('the gate binding in web.ts', () => {
   const SRC = readFileSync(join(__dirname, '../web.ts'), 'utf-8')
   it('runs after the 401 check and before ANY handler (network-info and the route chain)', () => {
-    const unauthorized = SRC.indexOf("res.end(JSON.stringify({ error: 'Unauthorized' }))")
+    // The 401 answer lives in gateRequest (auth-gate.ts) since per-agent tokens; web.ts calls it first.
+    const unauthorized = SRC.indexOf('await gateRequest(req, res, url, path, method')
     const gate = SRC.indexOf('operatorGateDecision(auth, path, () => readOperatorAccess())')
     const networkInfo = SRC.indexOf("if (path === '/api/network-info' && method === 'GET')")
     const firstHandler = SRC.indexOf('if (await tryHandleAuth(routeCtx)) return')
@@ -146,7 +147,8 @@ function fakeCtx(method: string, path: string, body: unknown, auth: RouteContext
 }
 
 describe('POST /api/auth/device-keys with a scope', () => {
-  const owner = { kind: 'token' } as RouteContext['auth']
+  // OWNERGATE4-1104: the owner as a session; the bare token mints only the first key of an install with no login.
+  const owner = { kind: 'session', user: 'owner' } as RouteContext['auth']
 
   it('an operator key defaults to 90 days', async () => {
     const { ctx, out } = fakeCtx('POST', '/api/auth/device-keys', { name: 'it-op', scope: 'operator' }, owner)

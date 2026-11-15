@@ -5,7 +5,8 @@ import { releaseOwnRespawnStamp, type OwnRespawnStamp } from './respawn-stamp-re
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
 import { hostname, loadavg, cpus, homedir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, execFile, spawn } from 'node:child_process'
+import { promisify } from 'node:util'
 import { makeLazyBinResolver } from '../platform.js'
 import { WEB_PORT } from '../config.js'
 import { logger } from '../logger.js'
@@ -44,7 +45,7 @@ import { freshSupervisor, launchdReloadVerdict, reloadWindowSec, runningChannels
 import { resolveMainConfigDecision, type MainConfigDecision } from './main-config-decision.js'
 import { runMainContinueRestart, type ContinueRestartResult } from './main-rotation-continue.js'
 import { withSessionSendLock } from './session-send-lock.js'
-import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence, reapForeignMainPollers } from './channel-poller-reap.js'
+import { reapChannelOrphans, reapDetachedChannelClaudes, collectPollerEvidence, reapForeignMainPollers, reapGromzoOrphans, scheduleGromzoOrphanReap } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn, wasPluginConfirmedAbsent, clearPluginAbsent } from './channel-plugin-unlock.js'
 import { getInjectedPrompt, matchesInjectedPrompt } from './injected-prompt-registry.js'
@@ -61,7 +62,7 @@ import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { recordChannelEvent } from './channel-event-log.js'
 import { notifyChannel, type AlertMeta } from '../notify.js'
 import type { PermPromptEscalationState } from './permission-prompt-escalation.js'
-import { sendRoutineAlert } from './routine-alert.js'
+import { sendRoutineAlert, sendOwnerActionAlert } from './routine-alert.js'
 import { runPermissionPromptPass, clearPermissionPromptAlert } from './permission-prompt-alert.js'
 import { getProvider, channelStateDir, channelStateDirEnvVar, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
@@ -72,11 +73,11 @@ import {
   AGENT_FAILURE_COUNT_TTL_MS,
   GIVE_UP_REALERT_MS,
   isFailureCountStale,
-  parseEtimeToSeconds,
+  etimeOutputToMs,
 } from './agent-restart-policy.js'
 // getClaudePidForSession + hasChannelPluginAlive live in the shared liveness
 // module so the standalone channel-coordinator reuses the exact same probe.
-import { getClaudePidForSession, hasChannelPluginAlive, probeChannelPluginLiveness, classifyRespawnStampAdvance } from '../channel-coordinator/liveness.js'
+import { getClaudePidForSession, getClaudePidForSessionAsync, hasChannelPluginAlive, probeChannelPluginLiveness, probeChannelPluginLivenessAsync, takeProcSnapshotAsync, classifyRespawnStampAdvance } from '../channel-coordinator/liveness.js'
 import { colistenProviders, runColistenCheck, type ColistenState } from './main-colisten-health.js'
 import { runReconcileBurst, waitReconcileGap, RECONCILE_MAIN_FIRST_MAX_WAIT_MS } from './reconcile-stagger.js'
 import { getDesiredAgents } from './agent-desired-state.js'
@@ -85,6 +86,8 @@ import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
 import { exactTmuxTarget } from '../tmux-target.js'
 import { beginMainRespawn } from './main-respawn-hold.js'
 import { whileNotFrozen } from './fleet-freeze.js'
+import { filterMainGromzoIds, mainGromzoSlug, MAIN_GROMZO_PLUGIN_ID } from './main-gromzo-launch.js'
+import { gromzoTokenExport, gromzoTokenFile } from './agent-extra-channels.js'
 
 // Lazily resolved (see makeLazyBinResolver): a module-level `resolveFromPath`
 // const throws at IMPORT time, so any environment where the binary is not
@@ -110,8 +113,19 @@ const CHANNELS_FAILURES_LOG_PATH = join(PROJECT_ROOT, 'store', 'channels-failure
 function getProcessAgeMs(pid: number): number {
   try {
     const out = execFileSync('/bin/ps', ['-o', 'etime=', '-p', String(pid)], { timeout: 3000, encoding: 'utf-8' })
-    const secs = parseEtimeToSeconds(out)
-    return secs < 0 ? -1 : secs * 1000
+    return etimeOutputToMs(out)
+  } catch {
+    return -1
+  }
+}
+
+const execFileAsyncCm = promisify(execFile)
+// Async twin of getProcessAgeMs for the per-minute check(): the sweep must not hold the
+// event loop on one ps per agent.
+async function getProcessAgeMsAsync(pid: number): Promise<number> {
+  try {
+    const { stdout } = await execFileAsyncCm('/bin/ps', ['-o', 'etime=', '-p', String(pid)], { timeout: 3000, encoding: 'utf-8' })
+    return etimeOutputToMs(stdout)
   } catch {
     return -1
   }
@@ -931,8 +945,8 @@ export function decideMarveenRecoveryReport(
 // Pure. The stage-4 message, written AFTER the hard restart returned so it
 // reports what actually happened instead of announcing an attempt.
 export function hardRestartStageAlertText(svcName: string, session: string, r: { ok: boolean; error?: string }): string {
-  if (r.ok) return `⚠️ Session resume nem segitett. Hard restart (${svcName}) elinditva a ${session} session-on.`
-  return `⚠️ Session resume nem segitett, es a hard restart (${svcName}) sem sikerult a ${session} session-on: ${r.error ?? 'ismeretlen hiba'}.`
+  if (r.ok) return `⚠️ Session resume nem segített. Hard restart (${svcName}) elindítva a ${session} session-on.`
+  return `⚠️ Session resume nem segített, és a hard restart (${svcName}) sem sikerült a ${session} session-on: ${r.error ?? 'ismeretlen hiba'}.`
 }
 
 function getMainAgentProvider(): ChannelProviderType {
@@ -1044,7 +1058,15 @@ export function readConfiguredMainModel(projectRoot: string = PROJECT_ROOT): str
 // Since BOOTSTAGGER1007 (b) the co-listen plugins are probed too
 // (checkMainColistenChannels / main-colisten-health.ts).
 export function readExtraChannelPluginIds(projectRoot: string = PROJECT_ROOT): string[] {
-  return readEnvValue(projectRoot, 'CHANNEL_PLUGINS_EXTRA').split(/\s+/).filter(Boolean)
+  // GROMZOMAINAGENT1106: the main agent's gromzo-channel id stays only with a usable agent.sock and a valid
+  // mxd slug, exactly as scripts/main-gromzo-launch.sh filters it for the shell launchers. Every caller (the
+  // three respawns, the isolated main config) then sees the same list as channels.sh.
+  return filterMainGromzoIds(readMainAgentIdRaw(projectRoot), readEnvValue(projectRoot, 'CHANNEL_PLUGINS_EXTRA').split(/\s+/).filter(Boolean))
+}
+
+/** The .env MAIN_AGENT_ID as written (the shell launchers read the same raw value for MXD_AGENT). */
+export function readMainAgentIdRaw(projectRoot: string = PROJECT_ROOT): string {
+  return readEnvValue(projectRoot, 'MAIN_AGENT_ID')
 }
 
 // Build the claude command used to (re)spawn the main channels session via
@@ -1102,10 +1124,24 @@ export function buildMainSessionRespawnCmd(opts: {
    * SLACKDMVESZT1006: the --settings file that ENABLES the extras for this
    * session only (writeMainExtraPluginsSettings). Without it a recovery
    * respawn lists the extras on --channels while the project scope keeps them
-   * disabled, and the extra bot comes up deaf. null/absent = no flag.
+   * disabled, and the extra bot comes up deaf. INSTALLDIRTYTREE1103: it carries
+   * the PRIMARY plugin too -- the tracked project settings.json is no longer
+   * written at launch, and it ships slack-channel false. null/absent = no flag.
    */
   extraSettingsPath?: string | null
+  /**
+   * GROMZOMAINAGENT1106: the .env MAIN_AGENT_ID (readMainAgentIdRaw). When `extraPluginIds` carries the
+   * gromzo-channel id, the respawn exports MXD_AGENT=<this slug> and MXD_SCOPE=both for the plugin, in
+   * this command only (never a settings file). Absent: the boot-time MAIN_AGENT_ID.
+   */
+  mainAgentId?: string
+  /** MXDAGENTSOCKID1106: the main agent's token file (gromzoTokenFile); absent: looked up for the slug. */
+  gromzoTokenFile?: string | null
 }): string {
+  const gromzoSlug = (opts.extraPluginIds ?? []).includes(MAIN_GROMZO_PLUGIN_ID)
+    ? mainGromzoSlug(opts.mainAgentId ?? MAIN_AGENT_ID)
+    : null
+  const gromzoToken = gromzoSlug ? gromzoTokenExport(opts.gromzoTokenFile !== undefined ? opts.gromzoTokenFile : gromzoTokenFile(gromzoSlug)) : ''
   return [
     // FLEETVENV923: same venv-first PATH as startAgentProcess and channels.sh.
     `export PATH="${fleetVenvPathPrefix()}/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"`,
@@ -1157,6 +1193,10 @@ export function buildMainSessionRespawnCmd(opts: {
       : opts.config.fleetToken
         ? [`&& export CLAUDE_CODE_OAUTH_TOKEN="$(cat '${FLEET_OAUTH_TOKEN_PATH}')"`]
         : []),
+    // GROMZOMAINAGENT1106: the plugin names itself with MXD_AGENT (main-gromzo-launch.ts).
+    // MXDAGENTSOCKID1106: and its token file, so a protected main agent's hello is not refused.
+    ...(gromzoSlug ? [`&& export MXD_AGENT="${gromzoSlug}" MXD_SCOPE="both"`] : []),
+    ...(gromzoToken ? [`&& ${gromzoToken.replace(/ && $/, '')}`] : []),
     '&&', opts.claudePath,
     ...(opts.continueSession ? ['--continue'] : []),
     '--dangerously-skip-permissions',
@@ -1241,7 +1281,8 @@ export function respawnMainSessionFresh(): void {
       claudePath: claudeBin(),
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
-      extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, readExtraChannelPluginIds()),
+      mainAgentId: readMainAgentIdRaw(),
+      extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, [provider.pluginId, ...readExtraChannelPluginIds()]),
       channelStateEnv: mainChannelStateEnv(provider.type),
       model: readConfiguredMainModel(),
       // The main session always starts a new conversation -- this is the whole
@@ -1262,6 +1303,8 @@ export function respawnMainSessionFresh(): void {
     // that is a success for our purposes (something IS coming up), not a failure to retry.
     if (mainChannelsSessionExists()) {
       execFileSync(tmuxBin(), ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
+      // MXDAGENTSOCKID1106 (b): the old claude's gromzo plugin outlives it (it ignores a closed stdin); sweep it once the respawn landed.
+      scheduleGromzoOrphanReap('main-respawn', tmuxBin())
     } else {
       // A fresh session starts its own claude: the respawn-specific follow-ups below
       // (identity, plugin unlock) are channels.sh's job on this path, not ours.
@@ -1346,7 +1389,8 @@ export async function resumeMarveenSession(opts: { byMonitor?: boolean } = {}): 
       claudePath: claudeBin(),
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
-    extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, readExtraChannelPluginIds()),
+      mainAgentId: readMainAgentIdRaw(),
+    extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, [provider.pluginId, ...readExtraChannelPluginIds()]),
       channelStateEnv: mainChannelStateEnv(provider.type),
       model: readConfiguredMainModel(),
       continueSession: true,
@@ -1358,6 +1402,8 @@ export async function resumeMarveenSession(opts: { byMonitor?: boolean } = {}): 
     })
     if (opts.byMonitor) monitorMainRespawnAt = Date.now()
     execFileSync(tmuxBin(), ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
+    // MXDAGENTSOCKID1106 (b): the old claude's gromzo plugin outlives it (it ignores a closed stdin); sweep it once the respawn landed.
+    scheduleGromzoOrphanReap('main-respawn', tmuxBin())
 
     // --continue replays the last conversation. When the prior session is large
     // (>200k tokens) Claude Code opens with a "Resume from summary" modal that
@@ -1602,7 +1648,10 @@ export function createMainChannelsSession(): MainSessionCreateResult {
   supervisorWait = wait.state
   if (wait.verdict === 'stuck') {
     logger.error({ session: MAIN_CHANNELS_SESSION, supervisors: live, absentSinceMs: now - wait.state!.since }, 'Main channels session still absent next to a running channels.sh supervisor -- the supervisor looks stuck; not starting a second one')
-    sendRoutineAlert('main-session-supervisor-stuck', `⚠️ A ${MAIN_CHANNELS_SESSION} session ${Math.round((now - wait.state!.since) / 60_000)} perce hiányzik, pedig fut channels.sh supervisor (pid ${live.map((s) => s.pid).join(', ')}): valószínűleg beragadt. Másodikat nem indítok mellé; kézi ellenőrzés kell.`)
+    // Owner-action, not self-heal: this branch deliberately starts nothing
+    // (a second supervisor would double-own the session) -- a manual check is
+    // the only recovery, so NOTIFY_ROUTINE_ALERTS must not silence it.
+    sendOwnerActionAlert('main-session-supervisor-stuck', `⚠️ A ${MAIN_CHANNELS_SESSION} session ${Math.round((now - wait.state!.since) / 60_000)} perce hiányzik, pedig fut channels.sh supervisor (pid ${live.map((s) => s.pid).join(', ')}): valószínűleg beragadt. Másodikat nem indítok mellé; kézi ellenőrzés kell.`)
     return 'grace'
   }
   if (wait.verdict === 'wait') {
@@ -1625,7 +1674,7 @@ export function createMainChannelsSession(): MainSessionCreateResult {
     // boot instead of stacking a respawn on a session that is still coming up.
     writeRespawnStamp()
     logger.warn({ session: MAIN_CHANNELS_SESSION }, 'Main channels session absent -- recreating via channels.sh')
-    sendRoutineAlert('main-session-recreate', `♻️ A ${MAIN_CHANNELS_SESSION} session eltunt -- ujrainditom (channels.sh). Enelkul minden utemezett feladat csendben kimaradna.`)
+    sendRoutineAlert('main-session-recreate', `♻️ A ${MAIN_CHANNELS_SESSION} session eltűnt -- újraindítom (channels.sh). Enélkül minden ütemezett feladat csendben kimaradna.`)
     return 'started'
   } catch (err) {
     logger.error({ err }, 'Failed to recreate main channels session via channels.sh')
@@ -1650,7 +1699,8 @@ function respawnMarveenSessionFresh(): boolean {
       claudePath: claudeBin(),
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
-    extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, readExtraChannelPluginIds()),
+      mainAgentId: readMainAgentIdRaw(),
+    extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, [provider.pluginId, ...readExtraChannelPluginIds()]),
       channelStateEnv: mainChannelStateEnv(provider.type),
       model: readConfiguredMainModel(),
       continueSession: false,
@@ -1660,6 +1710,8 @@ function respawnMarveenSessionFresh(): boolean {
       config: resolveMainConfigDecision(),
     })
     execFileSync(tmuxBin(), ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
+    // MXDAGENTSOCKID1106 (b): the old claude's gromzo plugin outlives it (it ignores a closed stdin); sweep it once the respawn landed.
+    scheduleGromzoOrphanReap('main-respawn', tmuxBin())
     logger.warn({ provider: provider.type }, 'Hard restart: marveen session respawned fresh (no --continue)')
     // Re-establish /rename on the fresh process (see note in resumeMarveenSession).
     // scheduleIdentitySetup only schedules delayed timers -> fire-and-forget.
@@ -1734,7 +1786,7 @@ function schedulePostResumePluginGuard(provider: ChannelProviderType): void {
         return
       }
       logger.warn({ provider }, 'Post-resume guard: --continue resume came up WITHOUT the channels plugin (CC 2.1.193) -- escalating to fresh respawn (context dropped, memory persists)')
-      sendRoutineAlert('post-resume-fresh-respawn', `⚠️ A --continue resume suketen jott fel (nincs channel plugin). Fresh respawn most a ${MAIN_CHANNELS_SESSION} session-on (a beszelgetes elveszik, memoria marad).`)
+      sendRoutineAlert('post-resume-fresh-respawn', `⚠️ A --continue resume süketen jött fel (nincs channel plugin). Fresh respawn most a ${MAIN_CHANNELS_SESSION} session-on (a beszélgetés elveszik, memória marad).`)
       respawnMarveenSessionFresh()
     } catch (err) {
       logger.warn({ err }, 'Post-resume guard probe failed (leaving recovery to the down-cascade)')
@@ -1809,7 +1861,9 @@ function verifyHardRestartLater(): void {
     () => paneRunsClaude(mainPaneDead(), getClaudePidForSession(MAIN_CHANNELS_SESSION)),
     () => {
       logger.error({ session: MAIN_CHANNELS_SESSION }, 'Hard restart reported success, but claude is not running in the main pane some minutes later')
-      sendRoutineAlert('main-hard-restart-no-claude', `⚠️ A ${MAIN_CHANNELS_SESSION} újraindítása után néhány perccel sem fut claude a fő pane-ben. A csatorna valószínűleg nem jött vissza; kézi ellenőrzés kell.`)
+      // Owner-action, not self-heal: the restart already ran and this is the
+      // verification that it did NOT take -- nothing further is attempted here.
+      sendOwnerActionAlert('main-hard-restart-no-claude', `⚠️ A ${MAIN_CHANNELS_SESSION} újraindítása után néhány perccel sem fut claude a fő pane-ben. A csatorna valószínűleg nem jött vissza; kézi ellenőrzés kell.`)
     },
   )
 }
@@ -1939,7 +1993,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   }
   if (step.sendResolved) {
     logger.info({ session: MAIN_CHANNELS_SESSION }, 'Stuck main channel input cleared -- closing the cap alert')
-    sendAlert(`✅ A ${MAIN_CHANNELS_SESSION} bemenete felszabadult: a panel tetlen es a beviteli mezo ures. A beragadt-bemenet riasztas lezarva.`)
+    sendAlert(`✅ A ${MAIN_CHANNELS_SESSION} bemenete felszabadult: a panel tétlen és a beviteli mező üres. A beragadt-bemenet riasztás lezárva.`)
   }
   if (!parked) return
   // Busy-guard: never hard-restart while the main pane is actively generating --
@@ -1983,7 +2037,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   if (action === 'skip') return
   if (action === 'alert') {
     logger.error({ session: MAIN_CHANNELS_SESSION }, 'Stuck main channel input survived max restart escalations -- manual intervention needed')
-    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt es ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabaditotta ki. Kezi beavatkozas kell: inditsd ujra a ${SERVICE_ID}-channels szolgaltatast.`)
+    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt, és ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabadította ki. Kézi beavatkozás kell: indítsd újra a ${SERVICE_ID}-channels szolgáltatást.`)
     stuckLadder.noteCapAlert()
     return
   }
@@ -2395,7 +2449,7 @@ function checkMainKeepaliveStaleness(): void {
   const staleDueToSleep = ageMs != null && systemSleptBetween(now - ageMs, now)
   logger.warn({ ageMs, paneState, staleDueToSleep }, 'Channel keep-alive stale -- main session likely wedged/deaf, respawning via respawn-pane')
   if (!staleDueToSleep) {
-    sendRoutineAlert('keepalive-respawn', `⚠️ A fő channel keep-alive ${ageMin} perce nem frissült -- respawn-pane a ${MAIN_CHANNELS_SESSION} session-on (a beszelgetes elveszik, memoria marad).`)
+    sendRoutineAlert('keepalive-respawn', `⚠️ A fő channel keep-alive ${ageMin} perce nem frissült -- respawn-pane a ${MAIN_CHANNELS_SESSION} session-on (a beszélgetés elveszik, memória marad).`)
   }
   if (respawnMarveenSessionFresh()) {
     marveenLastKeepaliveRespawn = now
@@ -2530,7 +2584,7 @@ async function handleMarveenDown(): Promise<void> {
     // Issue #189: a plain `tmux attach -t ...` may itself fail with "Permission
     // denied" when the operator is running it from another tmux session. Prefix
     // with `unset TMUX` so the hint works in both nested and non-nested cases.
-    sendAlert(`🚨 Hard restart SEM segitett. Kezzel kell megnezni: \`unset TMUX && tmux attach -t ${MAIN_CHANNELS_SESSION}\` es ${serviceCmd}.`)
+    sendAlert(`🚨 Hard restart SEM segített. Kézzel kell megnézni: \`unset TMUX && tmux attach -t ${MAIN_CHANNELS_SESSION}\` és ${serviceCmd}.`)
     // Hand the channel to the independent backstops instead of holding them off
     // with the stamp of a hard restart that did not work -- our own stamp only,
     // and only after its settle time (retried on later gave_up ticks).
@@ -2540,7 +2594,7 @@ async function handleMarveenDown(): Promise<void> {
   if (marveenDownState.stage === 'gave_up') tryReleaseOwnRespawnStamp(now)
   if (now - marveenDownState.lastAlertAt > PLUGIN_ALERT_DEDUP_MS) {
     marveenDownState.lastAlertAt = now
-    sendAlert(`🚨 ${BOT_NAME} ${providerLabel} plugin meg mindig halott. Nezd meg kezzel.`)
+    sendAlert(`🚨 ${BOT_NAME} ${providerLabel} plugin még mindig halott. Nézd meg kézzel.`)
   }
 }
 
@@ -2591,8 +2645,8 @@ function handleMarveenUp(): void {
     // disruptive too; decideMarveenRecoveryReport owns the rule.
     if (report.notify) {
       sendAlert(
-        `✅ ${BOT_NAME} ${providerLabel} kapcsolat helyreallt (${downedFor}s kieses, ${stage} szint). ` +
-        `Ha a kieses alatt irtal es nem jott valasz, mindjart potolom.`,
+        `✅ ${BOT_NAME} ${providerLabel} kapcsolat helyreállt (${downedFor}s kiesés, ${stage} szint). ` +
+        `Ha a kiesés alatt írtál és nem jött válasz, mindjárt pótolom.`,
       )
     }
     marveenDownState = null
@@ -2897,8 +2951,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       }
     }
 
+    // One ps snapshot for the whole liveness loop (null -> each probe takes its own).
+    const sweepSnapshot = await takeProcSnapshotAsync()
     for (const t of targets) {
-      const claudePid = getClaudePidForSession(t.session)
+      const claudePid = await getClaudePidForSessionAsync(t.session)
       if (!claudePid) {
         if (!t.isMarveen && t.agentName) {
           const lastRestart = agentLastRestart.get(t.agentName)
@@ -2930,7 +2986,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
         continue
       }
-      const liveness = probeChannelPluginLiveness(claudePid, t.provider, t.agentName)
+      // An 'alive' read from the shared snapshot is confirmed with a fresh ps when it would
+      // close an open down spell (and reset its restart back-off): the poller may have died
+      // after the snapshot was taken.
+      const openDownSpell = t.isMarveen
+        ? marveenSuspectFirstSeen !== null || marveenDownState !== null || marveenRecreatedOutage !== null
+        : agentDownSince.has(t.session) || (t.agentName !== undefined && agentRestartFailures.has(t.agentName))
+      const liveness = await probeChannelPluginLivenessAsync(claudePid, t.provider, t.agentName, { confirmAlive: openDownSpell }, sweepSnapshot ?? undefined)
       if (liveness === 'unknown') {
         // The PROBE failed (ps timed out, state dir unreadable) -- that is not
         // evidence about the plugin. Leave every counter untouched (down-since,
@@ -3004,6 +3066,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             logger.warn({ err, agent: t.agentName }, 'Plugin-down forensics failed (continuing)')
           }
         }
+        // Awaited BEFORE the restart state below is read: the context guard calls
+        // markAgentRestartPending() before its own stop, and a read taken before this
+        // await could miss that mark and restart the agent a second time.
+        const processAgeMs = await getProcessAgeMsAsync(claudePid)
         const lastRestart = agentLastRestart.get(t.agentName!)
         const failures = agentRestartFailures.get(t.agentName!) ?? 0
         // If the unlock probe confirmed the plugin ABSENT from /mcp (never
@@ -3023,7 +3089,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         const agentPaneState = agentPane != null ? detectPaneState(agentPane) : null
         const agentBusy = shouldDeferKeepaliveRespawn(agentPaneState)
         const action = decideDownAgentAction({
-          processAgeMs: getProcessAgeMs(claudePid),
+          processAgeMs,
           msSinceLastRestart: lastRestart != null ? Date.now() - lastRestart : null,
           startupGraceMs: AGENT_STARTUP_GRACE_MS,
           restartGraceMs: AGENT_RESTART_GRACE_MS,
@@ -3204,6 +3270,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       } catch (err) {
         logger.warn({ err }, 'channel-monitor: periodic detached-claude reap failed')
       }
+      // MXDAGENTSOCKID1106 (b): after the detached claudes are gone, their gromzo plugins are orphans; sweep them.
+      try {
+        const killed = reapGromzoOrphans({ tmuxPath: tmuxBin() })
+        if (killed.length > 0) logger.warn({ killed }, 'channel-monitor: periodic reap removed orphaned gromzo-channel plugin(s)')
+      } catch (err) {
+        logger.warn({ err }, 'channel-monitor: periodic gromzo-orphan reap failed')
+      }
       // Also sweep foreign MAIN-token pollers (a thief that never fully tripped
       // the down cascade -- flapping getUpdates when a local-agent-mode subagent
       // holds the token intermittently). Telegram only; fail-safe internally.
@@ -3222,7 +3295,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       checkRunning = false
     }
   }
-  setTimeout(() => { void check() }, 30000)
+  setTimeout(whileNotFrozen('channel-monitor', () => { void check() }), 30000)
   // KILLSWITCH1022: this tick also revives desired-but-missing agents
   // (reconcileDesiredAgents), which a stopped fleet must not do.
   return setInterval(whileNotFrozen('channel-monitor', () => { void check() }), 60000)

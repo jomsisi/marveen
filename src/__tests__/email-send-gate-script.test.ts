@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 // @ts-expect-error -- plain .mjs hook script, no types
@@ -77,6 +77,8 @@ describe('a sender script under any name (SCRIPTSENDGATE1020)', () => {
     const cwd = workdir({
       'prober.py': TELETHON_SCRIPT,
       'kreta_heti.py': 'print("weekly page")\n',
+      // JSCDSEND1104: a missing script is a send now (as in the python twin), so this control names a real file
+      'ncore.py': 'print("search")\n',
       'plain.mjs': 'console.log(1)\n',
       'notes.txt': 'smtplib is mentioned here, but this is no script',
     })
@@ -85,7 +87,6 @@ describe('a sender script under any name (SCRIPTSENDGATE1020)', () => {
       // a Telegram chat id after --to is no address
       'python3 kreta_heti.py --to 8224042443',
       'python3 ncore.py search "x" --top 40 --json',
-      'python3 missing.py',
       'node plain.mjs',
       'cat notes.txt',
       'grep -rn smtplib scripts/',
@@ -103,7 +104,7 @@ describe('a sender script under any name (SCRIPTSENDGATE1020)', () => {
   })
 
   it('the hook entrypoint resolves the script against the payload cwd', () => {
-    const cwd = workdir({ 'helden_send.py': SMTP_SCRIPT })
+    const cwd = workdir({ 'helden_send.py': SMTP_SCRIPT, 'other.py': 'print(1)\n' })
     const hook = join(__dirname, '..', '..', 'scripts', 'email-send-gate.mjs')
     const run = (command: string) => spawnSync(process.execPath, [hook], {
       input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }),
@@ -115,6 +116,16 @@ describe('a sender script under any name (SCRIPTSENDGATE1020)', () => {
     const other = run('python3 other.py')
     expect(other.status).toBe(0)
     expect(other.stdout).toBe('')
+    // JSCDSEND1104 (Samu 69516/69538): an ADDRESSED run of a missing script is denied, and the message says the
+    // script must exist at run time; without an address it passes
+    const missing = run('python3 missing.py --to a@example.invalid')
+    expect(missing.status).toBe(0)
+    const reason = JSON.parse(missing.stdout).hookSpecificOutput.permissionDecisionReason as string
+    expect(reason).toContain('NEM LETEZIK')
+    expect(reason).toContain('literalis uttal')
+    const unaddressed = run('python3 missing.py')
+    expect(unaddressed.status).toBe(0)
+    expect(unaddressed.stdout).toBe('')
   })
 })
 
@@ -155,7 +166,7 @@ describe('sender scripts, review round 1 (SCRIPTSENDGATE1020)', () => {
   })
 
   it('judges the string of a shell -c the same way', () => {
-    const cwd = workdir({ 'smtp_send.py': SMTP_SCRIPT })
+    const cwd = workdir({ 'smtp_send.py': SMTP_SCRIPT, 'other.py': 'print(1)\n' })
     for (const cmd of [
       'sh -c "python3 smtp_send.py"',
       "bash -lc 'timeout 30 python3 smtp_send.py'",
@@ -214,5 +225,268 @@ describe('sender scripts, review round 1 (SCRIPTSENDGATE1020)', () => {
     ]) {
       expect(bash(cmd, repo).deny, cmd).toBe(false)
     }
+  })
+})
+
+describe('Microsoft Graph sends in a script (MAILGATESCRIPT1027)', () => {
+  const GRAPH_SEND = "const id = process.argv[2]\nawait fetch('https://graph.microsoft.com/v1.0/me/messages/' + id + '/send', { method: 'POST' })\n"
+  const GRAPH_REPLY = "const u = 'x'\nawait fetch(`https://graph.microsoft.com/v1.0/users/${u}/messages/1/reply`, { method: 'POST' })\n"
+  const GRAPH_READ = "await fetch('https://graph.microsoft.com/v1.0/me/messages?top=5')\n"
+  const cwd = workdir({
+    'graph-send.mjs': GRAPH_SEND,
+    'graph-reply.ts': GRAPH_REPLY,
+    'graph-read.mjs': GRAPH_READ,
+    'harmless.mjs': "console.log('hello')\n",
+    'main.mjs': "import './lib.mjs'\nconsole.log('main')\n",
+    'lib.mjs': "await fetch('https://graph.microsoft.com/v1.0/me/sendMail', { method: 'POST' })\n",
+    'reexp.mjs': "export * from './transport2.mjs'\n",
+    'transport2.mjs': GRAPH_SEND,
+    'escaped.mjs': 'await fetch("https:\\/\\/graph.microsoft.com\\/v1.0\\/me\\/sendMail", { method: "POST" })\n',
+    'routes.mjs': "app.get('/me/messages/:id/reply', showReplyPage)\n",
+    'preview.mjs': "await fetch('https://graph.microsoft.com/v1.0/me/messages/1/send-preview')\n",
+    'real/main.mjs': "import './transport.mjs'\n",
+    'real/transport.mjs': GRAPH_SEND,
+    'link/.keep': '',
+    // MAILGATESCRIPT1027 R2: fixtures of the second-round review fixes
+    'r2real/main.mjs': [0, 1, 2, 3, 4].map((n) => `import './h${n}.mjs'`).join('\n') + '\n',
+    'r2real/h0.mjs': "const n = require('nodemailer')\n",
+    'r2real/h1.mjs': 'console.log(1)\n',
+    'r2real/h2.mjs': 'console.log(1)\n',
+    'r2real/h3.mjs': 'console.log(1)\n',
+    'r2real/h4.mjs': 'console.log(1)\n',
+    'r2link/.keep': '',
+    'r2types.ts': "export type { T } from './r2sender.mjs'\nimport type { U } from './r2sender.mjs'\nconsole.log(1)\n",
+    'r2sender.mjs': GRAPH_SEND,
+    'r2uni.mjs': "await fetch('https://graph.microsoft.com/v1.0/me/messages/1/reply\u00e9')\n",
+    'r2pkg/__init__.py': '',
+    'r2pkg/__main__.py': 'from . import mailer\n',
+    'r2pkg/mailer.py': 'import smtplib\n',
+    'r3esc.mjs': 'const u = "https://graph.microsoft.com/v1.0/me/sendMail\\"; await fetch(u)\n',
+    'r3sender.mjs': "import nodemailer from 'nodemailer'\nexport default 1\n",
+    'r3typedefault.mjs': "import type from './r3sender.mjs'\nvoid type\n",
+    'r3mailer.py': 'import smtplib\n',
+    'r3star.py': 'from r3mailer import *\n',
+  })
+  symlinkSync(join(cwd, 'real', 'main.mjs'), join(cwd, 'link', 'main.mjs'))
+  symlinkSync(join(cwd, 'r2real', 'main.mjs'), join(cwd, 'r2link', 'main.mjs'))
+
+  it('is a send for a node file, a .ts file and a file whose helper sends', () => {
+    for (const cmd of ['node graph-send.mjs AAMk1', 'tsx graph-reply.ts', 'node main.mjs']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+    }
+  })
+
+  it('is no send for a Graph read or a harmless file', () => {
+    for (const cmd of ['node graph-read.mjs', 'node harmless.mjs']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(false)
+    }
+  })
+
+  it('reads the script after bun run and npx tsx, and not after another npx package', () => {
+    expect(scriptRunSends('bun run graph-send.mjs', cwd)).toBe(true)
+    expect(scriptRunSends('npx tsx graph-send.mjs', cwd)).toBe(true)
+    expect(scriptRunSends('npx vitest run', cwd)).toBe(false)
+  })
+
+  it('follows an ESM re-export to the helper', () => {
+    expect(scriptRunSends('node reexp.mjs', cwd)).toBe(true)
+  })
+
+  it('sees a Graph URL with escaped slashes', () => {
+    expect(scriptRunSends('node escaped.mjs', cwd)).toBe(true)
+  })
+
+  it('is no send for an application route of the same shape or for send-preview', () => {
+    expect(scriptRunSends('node routes.mjs', cwd)).toBe(false)
+    expect(scriptRunSends('node preview.mjs', cwd)).toBe(false)
+  })
+
+  it('resolves helpers next to the real path of a symlinked entry', () => {
+    expect(scriptRunSends('node link/main.mjs', cwd)).toBe(true)
+  })
+
+  // MAILGATESCRIPT1027 R2
+  it('reads the real-path helpers of a symlinked entry with five imports', () => {
+    expect(scriptRunSends('node r2link/main.mjs', cwd)).toBe(true)
+  })
+
+  it('loads nothing for a type-only export or import', () => {
+    expect(scriptRunSends('tsx r2types.ts', cwd)).toBe(false)
+  })
+
+  it('ends no action word at a letter outside ASCII', () => {
+    expect(scriptRunSends('node r2uni.mjs', cwd)).toBe(false)
+    // MAILGATESCRIPT1027 R3: the forms the round-2 commit lost, and a value import named `type`
+    expect(scriptRunSends('node r3esc.mjs', cwd)).toBe(true)
+    expect(scriptRunSends('node r3typedefault.mjs', cwd)).toBe(true)
+    expect(scriptRunSends('python3 r3star.py', cwd)).toBe(true)
+  })
+
+  it('follows a package-relative python import', () => {
+    expect(scriptRunSends(`python3 ${cwd}/r2pkg/__main__.py`, cwd)).toBe(true)
+  })
+
+  it('is no script run for npx with another package, even with an address', () => {
+    expect(scriptRunSends('npx harmless-report --to qa@example.test', cwd)).toBe(false)
+  })
+})
+
+// MAILGATEDIRZIP1027: a real zip app (stored, __main__.py = print(1)); python runs it, the gate does not unpack it
+const HARMLESS_ZIP = Buffer.from(
+  'UEsDBBQAAAAAAEd9W10GHuE8CQAAAAkAAAALAAAAX19tYWluX18ucHlwcmludCgxKQpQSwECFAMUAAAAAABHfVtdBh7hPAkAAAAJAAAACwAAAAAAAAAAAAAAgAEAAAAAX19tYWluX18ucHlQSwUGAAAAAAEAAQA5AAAAMgAAAAAA',
+  'base64',
+)
+
+describe('python runs a directory or a zip app (MAILGATEDIRZIP1027)', () => {
+  it("reads a directory's __main__.py, and a zip app run by python is a send", () => {
+    const cwd = workdir({
+      'mdir/__main__.py': SMTP_SCRIPT,
+      'cdir/__main__.py': 'print(1)\n',
+      'edir/notes.txt': 'x\n',
+      'plain.py': 'print(1)\n',
+    })
+    writeFileSync(join(cwd, 'app.zip'), HARMLESS_ZIP)
+    writeFileSync(join(cwd, 'app.pyz'), HARMLESS_ZIP)
+    writeFileSync(join(cwd, 'shebang.pyz'), Buffer.concat([Buffer.from('#!/usr/bin/env python3\n'), HARMLESS_ZIP]))
+    chmodSync(join(cwd, 'shebang.pyz'), 0o755)
+    for (const cmd of ['python3 mdir', 'python3 mdir/', `python3 ${join(cwd, 'mdir')}`, 'python3 app.zip', 'python3 app.pyz', './shebang.pyz']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+      expect(bash(cmd, cwd).deny, cmd).toBe(true)
+    }
+    for (const cmd of ['python3 cdir', 'python3 edir', 'python3 cdir/__main__.py', 'python3 plain.py']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(false)
+      expect(bash(cmd, cwd).deny, cmd).toBe(false)
+    }
+  })
+})
+
+describe('python -m a local module, and node DIR (MAILGATEDIRZIP1027)', () => {
+  it('reads MOD.py or MOD/__main__.py for python -m', () => {
+    const cwd = workdir({
+      'mpkg/__init__.py': '',
+      'mpkg/main.py': SMTP_SCRIPT,
+      'mrun/__main__.py': SMTP_SCRIPT,
+      'mclean/__main__.py': 'print(1)\n',
+    })
+    for (const cmd of ['python3 -m mpkg.main', 'python3 -m mrun', 'python3 -mmrun', 'python3 -u -m mrun', 'python3 -um mpkg.main', 'python3 -BImmpkg.main']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+      expect(bash(cmd, cwd).deny, cmd).toBe(true)
+    }
+    for (const cmd of ['python3 -m mclean', 'python3 -um mclean', 'python3 -m json.tool', 'python3 -m nosuchmodule']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(false)
+      expect(bash(cmd, cwd).deny, cmd).toBe(false)
+    }
+  })
+
+  it('reads package.json main, else index.js, for node DIR', () => {
+    const cwd = workdir({
+      'nmain/package.json': '{"main": "lib/start.js"}',
+      'nmain/lib/start.js': "const m = require('nodemailer')\n",
+      'nidx/index.js': "const m = require('nodemailer')\n",
+      'nclean/index.js': 'console.log(1)\n',
+      'nbadmain/package.json': '{"main": "lib/start"}',
+      'nbadjson/package.json': '{ not json',
+      'nempty/notes.txt': 'x\n',
+      'nidxmain/package.json': '{"main": "index.js"}',
+      'ndirmain/package.json': '{"main": "index.js"}',
+      'ndirmain/index.js/index.js': "const m = require('nodemailer')\n",
+    })
+    for (const cmd of ['node nmain', 'node nidx', 'node nidx/', 'node nbadmain', 'node nbadjson', 'node nidxmain', 'node ndirmain']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+      expect(bash(cmd, cwd).deny, cmd).toBe(true)
+    }
+    for (const cmd of ['node nclean', 'node nempty', 'node nclean/index.js']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(false)
+      expect(bash(cmd, cwd).deny, cmd).toBe(false)
+    }
+  })
+})
+
+describe('env value options in front of the sender (ENVOPTHEAD1104)', () => {
+  it('a #! line env -P/-u/-C DIR python3 is read as python3; env -P / -S in the command line run the sender', () => {
+    const SMTP = 'import smtplib\nsmtplib.SMTP("h")\n'
+    const cwd = workdir({
+      p_sender: '#!/usr/bin/env -P /usr/bin python3\n' + SMTP,
+      u_sender: '#!/usr/bin/env -u FOO python3\n' + SMTP,
+      c_sender: '#!/usr/bin/env -C /tmp python3\n' + SMTP,
+      'send.py': SMTP,
+      harmless: '#!/usr/bin/env -P /usr/bin python3\nprint(1)\n',
+    })
+    for (const f of ['p_sender', 'u_sender', 'c_sender', 'harmless']) chmodSync(join(cwd, f), 0o755)
+    for (const cmd of ['./p_sender', './u_sender', './c_sender', 'env -P /tmp/x python3 send.py', 'env -S "python3 send.py"']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+    }
+    expect(scriptRunSends('./harmless', cwd)).toBe(false)
+  })
+})
+
+describe('a cd before the run, and a missing script (JSCDSEND1104, Bence 69475)', () => {
+  it('the script is resolved under every literal cd target too; an addressed undecidable cd or missing script is a send', () => {
+    const SMTP = 'import smtplib\nsmtplib.SMTP("h")\n'
+    const cwd = workdir({ 'send.py': 'print(1)\n' })
+    mkdirSync(join(cwd, 'evil'))
+    writeFileSync(join(cwd, 'evil', 'send.py'), SMTP)
+    mkdirSync(join(cwd, 'evil', 'pkg'))
+    writeFileSync(join(cwd, 'evil', 'pkg', '__init__.py'), '')
+    writeFileSync(join(cwd, 'evil', 'pkg', 'main.py'), SMTP)
+    for (const cmd of [`cd ${cwd}/evil && python3 send.py`, 'cd evil && python3 send.py', 'cd evil; python3 send.py',
+      'cd -- evil && python3 send.py', 'cd -P evil && python3 send.py', 'cd $DEST && python3 send.py a@example.invalid',
+      'cd evil && python3 -m pkg.main', 'cd $DEST && python3 -m pkg.main a@example.invalid', 'cd evil && ./send.py',
+      'python3 missing.py a@example.invalid', 'python3 $S a@example.invalid', 'node missing.mjs a@example.invalid',
+      'pushd evil && python3 send.py', 'cd $(pwd)/x && python3 send.py a@example.invalid']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+    }
+    // controls: the cwd's own harmless script, a cd into a dir without a sender, a non-script run; and (Samu 69538)
+    // the fail-closed forms without an address
+    for (const cmd of ['python3 send.py', `cd ${cwd} && python3 send.py`, 'cd evil && ls', 'bun test', 'node --version',
+      'cd $DEST && python3 send.py', 'cd $DEST && python3 -m pkg.main', 'python3 missing.py', 'python3 $S',
+      'node missing.mjs']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(false)
+    }
+    // Samu 69648 (3a): after a cd $(...) what runs is out of sight, so the fail-closed branches fire without an address
+    for (const cmd of ['cd $(pwd)/x && python3 send.py', 'cd `pwd`/x && python3 missing.py']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+    }
+  })
+})
+
+describe('env -C and the launchers in front of the sender (ENVOPTHEAD1104, Bence 69475/69481)', () => {
+  it('env -C DIR resolves the relative script under DIR; stdbuf / ionice / chrt / caffeinate run the command behind them', () => {
+    const SMTP = 'import smtplib\nsmtplib.SMTP("h")\n'
+    const cwd = workdir({ 'send.py': 'print(1)\n' })
+    mkdirSync(join(cwd, 'evil'))
+    writeFileSync(join(cwd, 'evil', 'send.py'), SMTP)
+    writeFileSync(join(cwd, 'sender.py'), SMTP)
+    for (const cmd of [`env -C ${cwd}/evil python3 send.py`, `env --chdir=${cwd}/evil python3 send.py`,
+      `env --chdir ${cwd}/evil python3 send.py`, `env -C${cwd}/evil python3 send.py`, 'env -C evil python3 send.py',
+      'env -C $X python3 send.py a@example.invalid', `env -a x -C ${cwd}/evil python3 send.py`, `env --c=${cwd}/evil python3 send.py`,
+      `env --chd ${cwd}/evil python3 send.py`, 'stdbuf -o0 python3 sender.py', 'ionice -c 3 python3 sender.py',
+      'chrt -r 1 python3 sender.py', 'caffeinate -i python3 sender.py']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+    }
+    expect(scriptRunSends('python3 send.py', cwd)).toBe(false)
+    expect(scriptRunSends(`env -C ${cwd} python3 send.py`, cwd)).toBe(false)
+  })
+
+  it('GNU env parses the options at the start of an -S value too, on the command line and on a #! line (Bence 69552)', () => {
+    const SMTP = 'import smtplib\nsmtplib.SMTP("h")\n'
+    const cwd = workdir({
+      'send.py': 'print(1)\n',
+      sa: '#!/usr/bin/env -S -a x python3\n' + SMTP,
+      sc: '#!/usr/bin/env -S --c /tmp python3\n' + SMTP,
+      su: '#!/usr/bin/env -S -u X python3\n' + SMTP,
+      si: '#!/usr/bin/env -S -i python3\n' + SMTP,
+    })
+    for (const f of ['sa', 'sc', 'su', 'si']) chmodSync(join(cwd, f), 0o755)
+    mkdirSync(join(cwd, 'evil'))
+    writeFileSync(join(cwd, 'evil', 'send.py'), SMTP)
+    for (const cmd of [`env -S "-C ${cwd}/evil python3 send.py"`, `env -S "--chdir=${cwd}/evil python3 send.py"`,
+      `env -S "-u X python3 ${cwd}/evil/send.py"`, `env -S "-a x python3 ${cwd}/evil/send.py"`,
+      `env -S "--c ${cwd}/evil" python3 send.py`, `env -S "-S '-C ${cwd}/evil python3 send.py'"`,
+      `env --split-string="-C ${cwd}/evil python3 send.py"`,
+      './sa', './sc', './su', './si']) {
+      expect(scriptRunSends(cmd, cwd), cmd).toBe(true)
+    }
+    expect(scriptRunSends(`env -S "-C ${cwd} python3 send.py"`, cwd)).toBe(false)
   })
 })

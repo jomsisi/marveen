@@ -85,9 +85,10 @@ describe('the guard raises the alert (pinned at the source)', () => {
   const i = RUNNER.indexOf('await performRestart(name)')
   // 4200, not 3000: the fleet's main-agent sink branch (operator notify for
   // MAIN_AGENT_ID) sits between the failure log and the queue send, and the
-  // window must still reach the send-verify + catch below it.
-  // 4400: the fork's one-line restart-effect registration sits in this stretch (fuggoRestartEllenorzesek.set).
-  const region = RUNNER.slice(i, i + 4400)
+  // window must still reach the send-verify + catch below it. 6000 since the
+  // heavy-job gate report added the post-restart settle lines and the split
+  // between a failed restart and a failure after a successful one.
+  const region = RUNNER.slice(i, i + 6000)
 
   it('clears the streak only on a rescue that actually ran', () => {
     const success = RUNNER.slice(i, RUNNER.indexOf('} catch (err) {', i))
@@ -138,7 +139,10 @@ import { join as joinRunnerPath } from 'node:path'
 describe('main-agent rescue alert goes to the operator, not its own queue', () => {
   const src = readRunnerSrc(joinRunnerPath(__dirname, '../web/context-guard-runner.ts'), 'utf-8')
   const lines = src.split('\n')
-  const sendIdx = lines.findIndex(l => l.includes('const msg = createAgentMessage('))
+  // Anchored on the RESCUE alert: the heavy-job gate alert has a
+  // queue send of its own earlier in the file.
+  const rescueIdx = lines.findIndex(l => l.includes('EGYMAST KOVETO bukott mentes a(z)'))
+  const sendIdx = lines.findIndex((l, n) => n > rescueIdx - 20 && l.includes('const msg = createAgentMessage('))
 
   it('branches MAIN_AGENT_ID to notifyChannel before the queue send', () => {
     expect(sendIdx, 'the queue send for sub-agent alerts disappeared').toBeGreaterThan(0)

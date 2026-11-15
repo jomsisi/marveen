@@ -1,6 +1,8 @@
-import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync, copyFileSync, renameSync } from 'node:fs'
+import { isSingleLineEnvValue } from '../../env.js'
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync, copyFileSync } from 'node:fs'
 import { join, extname, dirname } from 'node:path'
 import { homedir, platform, tmpdir } from 'node:os'
+import type { ServerResponse } from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { logger } from '../../logger.js'
@@ -23,7 +25,7 @@ import { claudeSupportForCli, isModelUnsupportedByCli, CLAUDE_MODEL_MIN_CLI } fr
 import { CHANNEL_PLUGIN_IDS } from '../plugin-ids.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
-import { listCustomProviders } from '../custom-providers.js'
+import { listCustomProviders, loadCustomProvider } from '../custom-providers.js'
 import {
   agentDir,
   agentConfigRoot,
@@ -37,6 +39,8 @@ import {
   writeAgentModelProfile,
   writeAgentModel,
   readAgentDisplayName,
+  readAgentTagline,
+  writeAgentTagline,
   writeAgentDisplayName,
   readAgentSecurityProfile,
   writeAgentSecurityProfile,
@@ -54,6 +58,7 @@ import {
   writeAgentMemoryIsolation,
   readAgentClaudeConfigDir,
   readAgentRemoteConfig,
+  readAgentRunAsUser,
   readAgentRemoteHost,
   writeAgentRemoteConfig,
   readAgentVoiceConfig,
@@ -64,7 +69,7 @@ import {
   type AuthMode,
   readJsonObjectForWrite,
 } from '../agent-config.js'
-import { readClaudePlans, resolveAgentConfigDir } from '../claude-plans.js'
+import { readClaudePlans } from '../claude-plans.js'
 import {
   readAgentTeam,
   writeAgentTeam,
@@ -123,6 +128,7 @@ import {
   agentSessionName,
   sendPromptToSession,
   capturePane,
+  withTmuxBatch,
   paneCurrentCommand,
   delay,
   resolveAgentProvider,
@@ -134,10 +140,10 @@ import type { AgentRunState } from '../ssh-tmux.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { detectPermissionMode, detectBackgroundAgents } from '../../pane-state.js'
 import { activityState, type ActivityState } from '../pane-liveness.js'
-import { checkAgentPutFields, checkConfigPutFields, AGENT_PUT_WRITABLE_FIELDS } from '../agent-put-fields.js'
+import { checkAgentPutFields, checkConfigPutFields, AGENT_PUT_WRITABLE_FIELDS, agentPutOwnerFields } from '../agent-put-fields.js'
 import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
-import { readContextGuardConfig, mergeContextGuardConfig, seedContextGuardForNewAgent } from '../context-guard-store.js'
+import { readContextGuardConfig, mergeContextGuardConfig, previewContextGuardMerge, seedContextGuardForNewAgent } from '../context-guard-store.js'
 import { getContextGuardStatus } from '../context-guard-runner.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
 import type { ContextGuardConfig } from '../../context-guard.js'
@@ -145,7 +151,7 @@ import type { ContextGuardConfig } from '../../context-guard.js'
 // the interface is added to its default too, so the accepted-key set cannot
 // drift away from what normalize*Config() actually reads.
 import { DEFAULT_AUTO_RESTART, LEGACY_AUTO_RESTART_FIELDS } from '../../auto-restart.js'
-import { DEFAULT_CONTEXT_GUARD } from '../../context-guard.js'
+import { DEFAULT_CONTEXT_GUARD, contextGuardTokenRefusals } from '../../context-guard.js'
 import { setStoreWriteActor } from '../../store-watcher.js'
 import { attemptChannelMcpReconnect } from '../channel-mcp-reconnect.js'
 import { getChannelHealth } from '../channel-health-monitor.js'
@@ -156,7 +162,8 @@ import {
 } from '../profiles.js'
 import { sanitizeAgentName, safeJoin } from '../sanitize.js'
 import { parseMultipart } from '../multipart.js'
-import { readBody, json, jsonMaybeGzip, serveFile } from '../http-helpers.js'
+import { readBody, readBodyOrRefuse, json, jsonMaybeGzip, serveFile } from '../http-helpers.js'
+import { serializeSkillsDir } from '../skills-dir-queue.js'
 import {
   exportAgentBundle,
   importAgentBundle,
@@ -178,7 +185,7 @@ import { getTokenSummary } from '../token-usage.js'
 import { listScheduledTasks } from '../scheduled-tasks-io.js'
 import { readAgentTranscript, isTranscriptAllowed } from '../agent-transcript.js'
 import { configDirFor } from '../main-transcript-root.js'
-import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
+import { kindAllowed, FORBIDDEN_KIND, mayActAsOwner, mayActAsOwnerOrFirstRun, refuseOwner, OWNER_SESSION_REQUIRED } from './auth.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
 
 const execFileAsync = promisify(execFile)
@@ -294,6 +301,11 @@ itt írhatod meg.
 // local agents fetch fresh (sub-ms tmux). See remote-status-cache.ts.
 const remoteRunStateCache = new RemoteStatusCache<AgentRunState>(5000)
 const remotePaneCache = new RemoteStatusCache<string | null>(3000)
+
+// One computed /api/agents/activity answer shared by every open dashboard tab.
+const ACTIVITY_CACHE_TTL_MS = 2000
+let activityCache: { at: number; entries: unknown[] } | null = null
+export function resetAgentsActivityCacheForTests(): void { activityCache = null }
 
 // Resolve an agent's run state, cached for remote agents to avoid blocking on
 // ssh. `isRemote` is passed by the caller (it already read the remote config).
@@ -433,6 +445,68 @@ function resolveAccessPath(name: string, provider: ChannelProviderType): string 
   return join(dir, 'access.json')
 }
 
+// ACCESSREADFAIL1030: the read half of every dashboard write to a channel
+// access.json (pairing approve, allowlist remove, Slack channel-request
+// approve). A MISSING file is a fresh start ({}), as before. A file that
+// EXISTS but cannot be read (EACCES/EPERM/...) or is not a JSON object is
+// refused: the route answers 500, writes nothing and renames nothing.
+// readFileOr's '{}' fallback used to turn an unreadable file into an empty
+// allowlist that the route then wrote back, wiping allowFrom, policy and
+// groups. readJsonObjectForWrite logs the path and the error, never the
+// file's contents. Returns null once the error response has been sent.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function readChannelAccessForWrite(res: ServerResponse, accessPath: string): Record<string, any> | null {
+  try {
+    return readJsonObjectForWrite(accessPath)
+  } catch (err) {
+    json(res, {
+      error: 'access.json exists but cannot be read or is not valid JSON; nothing was changed',
+      detail: err instanceof Error ? err.message : String(err),
+    }, 500)
+    return null
+  }
+}
+
+// OWNERGATE2-1104: whether a channel has NO approved sender yet, i.e. its next pairing approve is the first one (the
+// owner's own pairing on a fresh install). True only when access.json is missing or has an empty allowFrom and no
+// groups, AND its approved/ dir (one marker per approved sender, written by the approve route) is missing or empty.
+// An access.json that exists but cannot be read counts as HAVING a sender (fail closed: the strict gate applies).
+function channelHasNoApprovedSender(chDir: string): boolean {
+  let access: Record<string, unknown>
+  try {
+    access = readJsonObjectForWrite(join(chDir, 'access.json'))
+  } catch {
+    return false
+  }
+  if (Array.isArray(access.allowFrom) && access.allowFrom.length > 0) return false
+  if (access.allowFrom !== undefined && !Array.isArray(access.allowFrom)) return false
+  if (access.groups && typeof access.groups === 'object' && Object.keys(access.groups as object).length > 0) return false
+  const approvedDir = join(chDir, 'approved')
+  try {
+    if (readdirSync(approvedDir).length > 0) return false
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') return false
+  }
+  return true
+}
+
+// OWNERGATE4-1104 (review, Samu 69637): whether a channel is still unconfigured, i.e. its next setup is the first
+// one (onboarding step 2 on a fresh install). True only when the channel dir's .env holds no setting (missing, or
+// only blank and # comment lines) AND the channel has no approved sender (channelHasNoApprovedSender). Any KEY=value
+// line counts as configured, not only the provider's token key: setup writes nothing else there, and a narrower
+// reading could only reopen the path. Fail closed: a .env that exists but cannot be read, and an access.json that
+// cannot be read or is not a JSON object, count as configured, so the strict gate applies.
+function channelIsUnconfigured(chDir: string): boolean {
+  let env = ''
+  try {
+    env = readFileSync(join(chDir, '.env'), 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') return false
+  }
+  if (env.split('\n').some((line) => { const t = line.trim(); return t.length > 0 && !t.startsWith('#') })) return false
+  return channelHasNoApprovedSender(chDir)
+}
+
 function extractBotId(token: string): string | null {
   const colon = token.indexOf(':')
   if (colon < 1) return null
@@ -476,6 +550,8 @@ function findBotTokenDuplicate(
 export interface AgentSummary {
   name: string
   displayName: string
+  /** Short owner-written role line shown in the team graph; '' when unset. */
+  tagline: string
   description: string
   /** The concrete model id this agent resolves to. Unchanged meaning: for a
    *  config that names a `model`, this is exactly what it always was. */
@@ -499,6 +575,8 @@ export interface AgentSummary {
   hasSlack: boolean
   hasGooglechat: boolean
   hasTeams: boolean
+  /** The agent's own channel provider from agent-config.json, null when unset. */
+  channelProvider: string | null
   status: 'configured' | 'draft'
   running: boolean
   /** Tri-state: 'running' | 'stopped' | 'unreachable' (remote ssh failure). */
@@ -506,6 +584,11 @@ export interface AgentSummary {
   /** Remote ssh destination + workdir, or null for a local agent. */
   remoteHost: string | null
   remoteWorkdir: string | null
+  /** The OS user the agent runs as (agent-config.json runAsUser, validated by
+   *  readAgentRunAsUser -- the same value the spawn uses), null when not
+   *  configured. Not a secret: tools acting for the agent read it here instead
+   *  of parsing agent-config.json themselves (#2358). */
+  runAsUser: string | null
   session?: string
   hasAvatar: boolean
   /** Character nickname from store/team-nicknames.json; undefined when unset. */
@@ -525,6 +608,12 @@ export interface AgentSummary {
    *  copies into this agent's isolated config dir -- drives the dashboard
    *  warning. Empty when there is nothing to warn about. */
   sharedEnvAuthKeys: string[]
+  /** The custom provider id the agent is set to when that provider no longer exists (the agent will not start),
+   *  else null -- drives the warning on the agent card. */
+  missingCustomProvider: string | null
+  /** A model saved as the picker value ("custom:<id>") with no customProvider beside it: no model a provider knows,
+   *  and the provider is on no record (the new-agent wizard saved it so before it sent the two apart), else null. */
+  brokenCustomModel: string | null
 }
 
 interface AgentDetail extends AgentSummary {
@@ -568,7 +657,12 @@ interface AgentDetail extends AgentSummary {
 // launcher's logic is how the two paths drift.
 export function resolveTranscriptLocation(name: string): { workingDir: string; configDir: string | undefined } {
   if (!isMainChannelsAgent(name)) {
-    return { workingDir: agentDir(name), configDir: resolveAgentConfigDir(name).configDir ?? undefined }
+    // configDirFor, not resolveAgentConfigDir: the latter only knows an explicit
+    // claudeConfigDir field and answers null for an auto-provisioned
+    // agents/<name>/.claude-config, so the listing read the host default root and
+    // showed contextTokens null while the guard (configDirFor) saw the live
+    // transcript (measured 2026-10-26 on a sub-agent of the owner's install).
+    return { workingDir: agentDir(name), configDir: configDirFor(name) }
   }
   const isolated = join(PROJECT_ROOT, '.channels-config')
   return {
@@ -627,6 +721,7 @@ function getAgentSummary(name: string): AgentSummary {
   return {
     name,
     displayName: readAgentDisplayName(name),
+    tagline: readAgentTagline(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: modelResolution.model,
     modelProfile: typeof agentModelConfig.modelProfile === 'string' ? agentModelConfig.modelProfile : null,
@@ -644,11 +739,13 @@ function getAgentSummary(name: string): AgentSummary {
     hasSlack: sc.hasSlack,
     hasGooglechat: gc.hasGooglechat,
     hasTeams: tc.hasTeams,
+    channelProvider: readAgentChannelProvider(name),
     status: hasClaudeMd && hasSoulMd ? 'configured' : 'draft',
     running,
     runState,
     remoteHost: remote.host,
     remoteWorkdir: remote.workdir,
+    runAsUser: readAgentRunAsUser(name),
     session,
     hasAvatar: findAvatarForAgent(name) !== null,
     nickname: nicknameFor(name),
@@ -662,6 +759,8 @@ function getAgentSummary(name: string): AgentSummary {
     needsReauth: reauth.needsReauth,
     reauthReason: reauth.reason,
     sharedEnvAuthKeys: sharedEnvAuthKeysCopiedTo(name),
+    missingCustomProvider: (() => { const id = readAgentCustomProvider(name); return id && !loadCustomProvider(id) ? id : null })(),
+    brokenCustomModel: typeof agentModelConfig.model === 'string' && agentModelConfig.model.startsWith('custom:') && !readAgentCustomProvider(name) ? agentModelConfig.model : null,
   }
 }
 
@@ -701,7 +800,7 @@ function getAgentDetail(name: string): AgentDetail {
 }
 
 export function listAgentSummaries(): AgentSummary[] {
-  return listAgentNames().map(getAgentSummary)
+  return withTmuxBatch(() => listAgentNames().map(getAgentSummary))
 }
 
 // Max inter-agent messages a single main-agent inbox drain returns. The rest
@@ -840,6 +939,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     return true
   }
   if (path === '/api/openrouter/manual' && method === 'POST') {
+    // OWNERGATE3-1104: rewrites the curated manual OpenRouter model list, which every agent's model dropdown offers
+    // (and so which paid models the fleet can be switched to); owner-only, before the body is read.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Changing the curated OpenRouter model list needs the dashboard login (an owner session).')
+      return true
+    }
     if (getSecret('openrouter-fleet-key') === null) {
       json(res, { error: 'OpenRouter not configured' }, 403)
       return true
@@ -906,41 +1011,51 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const bgAgentsOf = (running: boolean, pane: string | null): { total: number; running: number; queued: number } | null =>
       running && pane !== null ? detectBackgroundAgents(pane) : null
 
+    const now = Date.now()
+    if (activityCache && now - activityCache.at >= 0 && now - activityCache.at < ACTIVITY_CACHE_TTL_MS) {
+      jsonMaybeGzip(req, res, activityCache.entries)
+      return true
+    }
+
     const entries: Array<{ name: string; isMain: boolean; running: boolean; state: string; mode: string | null; bgAgents: { total: number; running: number; queued: number } | null; tail: string[] }> = []
 
-    // Main agent runs in the --channels session, not agent-<name>.
-    {
-      const mainPane = capturePane(MAIN_CHANNELS_SESSION)
-      const running = mainPane !== null
-      const mainPaneCommand = running ? paneCurrentCommand(MAIN_CHANNELS_SESSION) : null
-      entries.push({
-        name: MAIN_AGENT_ID,
-        isMain: true,
-        running,
-        state: paneActivityLabel(running, mainPane, mainPaneCommand),
-        mode: modeOf(running, mainPane),
-        bgAgents: bgAgentsOf(running, mainPane),
-        tail: tailOf(mainPane),
-      })
-    }
-
-    for (const name of withoutMainAgent(listAgentNames())) {
-      // Remote agents: resolve run state + pane through the short-TTL caches so
-      // this 3s-polled endpoint never blocks the event loop on an ssh timeout.
-      const host = readAgentRemoteHost(name)
-      const runState = agentRunStateCached(name, host != null)
-      const running = runState === 'running'
-      let pane: string | null = null
-      if (running) {
-        pane = host
-          ? remotePaneCache.getOrRefresh(name, Date.now(), () => capturePane(agentSessionName(name), host), null)
-          : capturePane(agentSessionName(name))
+    withTmuxBatch(() => {
+      // Main agent runs in the --channels session, not agent-<name>.
+      {
+        const mainPane = capturePane(MAIN_CHANNELS_SESSION)
+        const running = mainPane !== null
+        const mainPaneCommand = running ? paneCurrentCommand(MAIN_CHANNELS_SESSION) : null
+        entries.push({
+          name: MAIN_AGENT_ID,
+          isMain: true,
+          running,
+          state: paneActivityLabel(running, mainPane, mainPaneCommand),
+          mode: modeOf(running, mainPane),
+          bgAgents: bgAgentsOf(running, mainPane),
+          tail: tailOf(mainPane),
+        })
       }
-      const paneCommand = running && !host ? paneCurrentCommand(agentSessionName(name)) : null
-      const state = runState === 'unreachable' ? 'unreachable' : paneActivityLabel(running, pane, paneCommand)
-      entries.push({ name, isMain: false, running, state, mode: modeOf(running, pane), bgAgents: bgAgentsOf(running, pane), tail: tailOf(pane) })
-    }
 
+      for (const name of withoutMainAgent(listAgentNames())) {
+        // Remote agents: resolve run state + pane through the short-TTL caches so
+        // this 3s-polled endpoint never blocks the event loop on an ssh timeout.
+        const host = readAgentRemoteHost(name)
+        const runState = agentRunStateCached(name, host != null)
+        const running = runState === 'running'
+        let pane: string | null = null
+        if (running) {
+          pane = host
+            ? remotePaneCache.getOrRefresh(name, Date.now(), () => capturePane(agentSessionName(name), host), null)
+            : capturePane(agentSessionName(name))
+        }
+        const paneCommand = running && !host ? paneCurrentCommand(agentSessionName(name)) : null
+        const state = runState === 'unreachable' ? 'unreachable' : paneActivityLabel(running, pane, paneCommand)
+        entries.push({ name, isMain: false, running, state, mode: modeOf(running, pane), bgAgents: bgAgentsOf(running, pane), tail: tailOf(pane) })
+      }
+    })
+
+    // Stamped after the compute: under load one compute can take most of the TTL itself.
+    activityCache = { at: Date.now(), entries }
     jsonMaybeGzip(req, res, entries)
     return true
   }
@@ -988,25 +1103,27 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     }
 
     const rows: AgentStatusRow[] = []
-    {
-      const mainPane = capturePane(MAIN_CHANNELS_SESSION)
-      const running = mainPane !== null
-      const mainPaneCommand = running ? paneCurrentCommand(MAIN_CHANNELS_SESSION) : null
-      rows.push(deriveAgentStatus(signalsFor(MAIN_AGENT_ID, true, running, mainPane, running ? 'running' : 'stopped', mainPaneCommand)))
-    }
-    for (const name of withoutMainAgent(listAgentNames())) {
-      const host = readAgentRemoteHost(name)
-      const runState = agentRunStateCached(name, host != null)
-      const running = runState === 'running'
-      let pane: string | null = null
-      if (running) {
-        pane = host
-          ? remotePaneCache.getOrRefresh(name, Date.now(), () => capturePane(agentSessionName(name), host), null)
-          : capturePane(agentSessionName(name))
+    withTmuxBatch(() => {
+      {
+        const mainPane = capturePane(MAIN_CHANNELS_SESSION)
+        const running = mainPane !== null
+        const mainPaneCommand = running ? paneCurrentCommand(MAIN_CHANNELS_SESSION) : null
+        rows.push(deriveAgentStatus(signalsFor(MAIN_AGENT_ID, true, running, mainPane, running ? 'running' : 'stopped', mainPaneCommand)))
       }
-      const paneCommand = running && !host ? paneCurrentCommand(agentSessionName(name)) : null
-      rows.push(deriveAgentStatus(signalsFor(name, false, running, pane, runState, paneCommand)))
-    }
+      for (const name of withoutMainAgent(listAgentNames())) {
+        const host = readAgentRemoteHost(name)
+        const runState = agentRunStateCached(name, host != null)
+        const running = runState === 'running'
+        let pane: string | null = null
+        if (running) {
+          pane = host
+            ? remotePaneCache.getOrRefresh(name, Date.now(), () => capturePane(agentSessionName(name), host), null)
+            : capturePane(agentSessionName(name))
+        }
+        const paneCommand = running && !host ? paneCurrentCommand(agentSessionName(name)) : null
+        rows.push(deriveAgentStatus(signalsFor(name, false, running, pane, runState, paneCommand)))
+      }
+    })
 
     jsonMaybeGzip(req, res, rows)
     return true
@@ -1120,9 +1237,20 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   }
 
   if (path === '/api/agents' && method === 'POST') {
+    // OWNERGATE2-1104: creates a whole agent (its dir, settings.json from a security profile, CLAUDE.md) and
+    // announces it to the fleet. Gated before the CLI probe and the scaffold; the first-run setup keeps the token
+    // (OWNERGATE4-1104, FIRST_RUN_PATHS 'agent-create').
+    if (!mayActAsOwnerOrFirstRun(ctx.auth, req, 'agent-create')) {
+      json(res, { ...OWNER_SESSION_REQUIRED, error: 'Creating an agent needs the dashboard login (an owner session).' }, 403)
+      return true
+    }
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
     const { description, model: rawModel, profile: rawProfile } = data as { name: string; description: string; model?: string; profile?: string }
+    // A custom provider is stored apart from the model id, as the editor's PUT does. The wizard used to send its
+    // picker value ("custom:<id>") as the model, so the agent ran that string as a model and the provider was on no
+    // record: its delete named no agent, and the agent could not start.
+    const customProvider = typeof data.customProvider === 'string' && data.customProvider.trim() ? data.customProvider.trim() : null
     const rawName = typeof data.name === 'string' ? data.name.trim() : ''
     const name = sanitizeAgentName(rawName)
     // DEFAULTCLIGUARD927: no model in the request = the install default,
@@ -1137,6 +1265,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // writeAgentModel used to be the first check, after scaffoldAgentDir, and a
     // malformed id left a half-created agent dir behind.
     if (!isValidModelId(model)) { json(res, { error: new InvalidModelIdError(model).message }, 400); return true }
+    // Checked before anything is created, like the model: an agent on a missing provider would not start.
+    if (customProvider && !loadCustomProvider(customProvider)) { json(res, { error: `Unknown custom provider: ${customProvider}` }, 400); return true }
     // PICKERCLIKAPU923: the API is a writer too, not only the picker. A fresh
     // probe, so a CLI upgraded a minute ago is not refused on a stale cache.
     const cliGate = await refuseIfCliCannotLaunch(model)
@@ -1154,6 +1284,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
     scaffoldAgentDir(name)
     writeAgentModel(name, model)
+    if (customProvider) writeAgentCustomProvider(name, customProvider)
     writeAgentSecurityProfile(name, profileId)
     writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
     // A new agent comes up with the context guard ARMED (fleet policy, 2026-09-08).
@@ -1469,6 +1600,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // Marveen lives at PROJECT_ROOT, not under agents/marveen/ -- skip the
     // dir check for the main agent and route writes to ~/.claude/channels/.
     if (!isMain && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // OWNERGATE2-1104: writes the channel .env (bot token) and access.json (allowFrom, owner), i.e. who may talk to
+    // the agent; the main agent's channel too. The first-run setup keeps the token (customer install;
+    // OWNERGATE4-1104, FIRST_RUN_PATHS 'channel-setup').
+    // OWNERGATE4-1104 (review, Samu 69637): only while THIS agent's THIS channel is still unconfigured (no setting in
+    // its .env, no approved sender; the same dir the write below uses, the main agent's via channelStateDir(provider)).
+    // Once set up, a second setup is the owner gate: the bare shared token cannot overwrite the bot or the access list.
+    const setupChDir = isMain ? channelStateDir(provider) : channelStateDir(provider, agentDir(name))
+    const firstSetup = channelIsUnconfigured(setupChDir)
+    if (!(firstSetup ? mayActAsOwnerOrFirstRun(ctx.auth, req, 'channel-setup') : mayActAsOwner(ctx.auth, req))) {
+      refuseOwner(res, 'Setting up an agent\'s channel needs the dashboard login (an owner session).')
+      return true
+    }
 
     const body = await readBody(req)
 
@@ -1480,6 +1623,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         JSON.parse(body.toString()) as { saKeyPath?: string; projectId?: string; subscription?: string; owner?: string; allowDomain?: string }
       if (!saKeyPath?.trim() || !projectId?.trim() || !subscription?.trim() || !owner?.trim()) {
         json(res, { error: 'Google Chat: saKeyPath, projectId, subscription és owner kötelező' }, 400); return true
+      }
+      // Each goes into the channel .env as one KEY=value line (ENVTEAMSNAME1028).
+      if (![saKeyPath, projectId, subscription].every((v) => isSingleLineEnvValue(v.trim()))) {
+        json(res, { error: 'Google Chat: a mezők nem tartalmazhatnak sortörést' }, 400); return true
       }
       const gcDir = isMain ? channelStateDir(provider) : channelStateDir(provider, agentDir(name))
       mkdirSync(gcDir, { recursive: true })
@@ -1542,6 +1689,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
     const { botToken, appToken, channelId, extra, allowFrom } = JSON.parse(body.toString()) as { botToken: string; appToken?: string; channelId?: string; extra?: unknown; allowFrom?: unknown }
     if (!botToken?.trim()) { json(res, { error: 'botToken is required' }, 400); return true }
+    // Each token goes into the channel .env as one KEY=value line (ENVTEAMSNAME1028); refused before any network check.
+    if (![botToken, appToken ?? '', channelId ?? ''].every((v) => typeof v === 'string' && isSingleLineEnvValue(v.trim()))) {
+      json(res, { error: 'A token nem tartalmazhat sortörést' }, 400); return true
+    }
 
     // AGENTEXTRACH1006: `extra: true` connects this provider NEXT TO the
     // agent's primary channel instead of replacing it. The primary's
@@ -1684,6 +1835,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (setupMatch && method === 'DELETE') {
     const [name, provider] = setupMatch
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // OWNERGATE2-1104: deletes the channel .env and access.json and clears the agent's channel provider, cutting the
+    // owner off from the agent; owner-only.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Removing an agent\'s channel needs the dashboard login (an owner session).')
+      return true
+    }
     const stateDir = channelStateDir(provider, agentDir(name))
     const envFile = join(stateDir, '.env')
     const accessFile = join(stateDir, 'access.json')
@@ -1730,6 +1887,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (secGetMatch && method === 'PUT') {
     const name = decodeURIComponent(secGetMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // APIAGENTWRITE1104: the profile rewrites the agent's settings.json (its permission mode and filesystem
+    // allow/deny), so it needs the owner, not the shared access token.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Changing an agent\'s security profile needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     const data = JSON.parse(body.toString()) as { profile?: string }
     const requested = (data.profile || '').trim()
@@ -1817,6 +1980,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   const autoRestartMatch = path.match(/^\/api\/agents\/([^/]+)\/auto-restart$/)
   if (autoRestartMatch && method === 'PUT') {
     const name = decodeURIComponent(autoRestartMatch[1])
+    // OWNERGATE3-1104: writes store/auto-restart.json, which decides when the runner restarts this agent (the main
+    // agent included), and in 'fresh' mode drops its conversation; owner-only, before the body is read. No machine
+    // caller: the runner reads the store in-process, and no script or skill PUTs here.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Changing an agent\'s auto-restart schedule needs the dashboard login (an owner session).')
+      return true
+    }
     if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     const body = await readBody(req)
     let data: unknown
@@ -1857,6 +2027,17 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: cgFields.message, rejected: cgFields.rejected, known: Object.keys(DEFAULT_CONTEXT_GUARD) }, 400)
       return true
     }
+    // OWNERGATE3-1104 (review, Samu 69602): a direction gate. The shared token may only STRENGTHEN a guard (the main
+    // agent arms other agents' guards with it, skill agent-cold-restart-guard-arming); any weakening (a switch off, a
+    // threshold or a wait raised, see contextGuardWeakenings) needs the owner, on any agent, before anything is written.
+    // Review (Dani 69657): strengthening is bounded too, see contextGuardTokenRefusals: with the token a switch may
+    // only turn on and any other field may only go back to its shipped default (and never weaken).
+    const { current: cgBefore, merged: cgAfter } = previewContextGuardMerge(name, data)
+    const tokenRefused = contextGuardTokenRefusals(cgBefore, cgAfter)
+    if (tokenRefused.length > 0 && !mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, `Changing ${tokenRefused.join(', ')} of an agent's context guard this way needs the dashboard login (an owner session); the access token can only turn the guard's switches on and restore the shipped defaults.`, { fields: tokenRefused })
+      return true
+    }
     setStoreWriteActor('dashboard')
     const saved = mergeContextGuardConfig(name, data)
     json(res, { ok: true, contextGuard: saved })
@@ -1878,6 +2059,11 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const name = decodeURIComponent(remoteCfgMatch[1])
     if (name === MAIN_AGENT_ID) { json(res, { error: 'Main agent is always local' }, 400); return true }
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // APIAGENTWRITE1104: host and workdir decide on which machine, over ssh, the agent's session runs.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Changing where an agent runs (remote host, workdir) needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     let data: { host?: string; workdir?: string }
     try { data = JSON.parse(body.toString() || '{}') } catch { json(res, { error: 'invalid JSON' }, 400); return true }
@@ -1895,6 +2081,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       id: string
       label: string
       role: 'main' | 'leader' | 'member'
+      tagline?: string
       reportsTo: string | null
       delegatesTo: string[]
       running?: boolean
@@ -1914,6 +2101,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         id: agentName,
         label: readAgentDisplayName(agentName),
         role: team.role,
+        tagline: readAgentTagline(agentName),
         reportsTo: team.reportsTo,
         delegatesTo: team.delegatesTo,
         running: isAgentRunning(agentName),
@@ -1936,13 +2124,19 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (teamMatch && method === 'GET') {
     const name = decodeURIComponent(teamMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
-    json(res, readAgentTeam(name))
+    json(res, { ...readAgentTeam(name), tagline: readAgentTagline(name) })
     return true
   }
 
   if (teamMatch && method === 'PUT') {
     const name = decodeURIComponent(teamMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // OWNERGATE2-1104: writes the team block (trustFrom, reportsTo, delegatesTo), which decides whose messages the
+    // agent treats as a trusted peer; a sub-agent must not grant itself that trust.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Changing an agent\'s team and trust settings needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
     const current = readAgentTeam(name)
@@ -1973,7 +2167,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     }
     const { team: next, warnings } = sanitizeTeamConfig(name, proposed)
     writeAgentTeam(name, next)
-    json(res, { ok: true, team: next, warnings, cycleRejected })
+    // The tagline lives beside the team block (a top-level config key, like
+    // displayName); only touched when the request carries it.
+    if (typeof data.tagline === 'string') writeAgentTagline(name, data.tagline)
+    json(res, { ok: true, team: next, tagline: readAgentTagline(name), warnings, cycleRejected })
     return true
   }
 
@@ -2012,19 +2209,29 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: 'Agent not found' }, 404)
       return true
     }
+    const chDir = name === MAIN_AGENT_ID
+      ? channelStateDir(provider)
+      : channelStateDir(provider, agentDir(name))
+    // OWNERGATE2-1104: adds the pairing sender to access.json allowFrom, i.e. grants someone the right to message
+    // the agent; owner-only. The FIRST pairing of a channel (no approved sender yet: channelHasNoApprovedSender)
+    // keeps the first-run setup (OWNERGATE4-1104, FIRST_RUN_PATHS 'first-pairing'), so a fresh customer install can
+    // pair its owner before any dashboard login exists (onboarding step 3). Once the channel has an approved sender,
+    // every further approve is the owner gate: the bare shared token cannot add a second sender.
+    const firstPairing = channelHasNoApprovedSender(chDir)
+    if (!(firstPairing ? mayActAsOwnerOrFirstRun(ctx.auth, req, 'first-pairing') : mayActAsOwner(ctx.auth, req))) {
+      refuseOwner(res, 'Approving a channel pairing needs the dashboard login (an owner session).')
+      return true
+    }
 
     const body = await readBody(req)
     const { code } = JSON.parse(body.toString()) as { code: string }
     if (!code?.trim()) { json(res, { error: 'Code is required' }, 400); return true }
 
-    const chDir = name === MAIN_AGENT_ID
-      ? channelStateDir(provider)
-      : channelStateDir(provider, agentDir(name))
     const accessPath = join(chDir, 'access.json')
-    const accessContent = readFileOr(accessPath, '{}')
+    const access = readChannelAccessForWrite(res, accessPath)
+    if (!access) return true
 
     try {
-      const access = JSON.parse(accessContent)
       const pending = access.pending || {}
       const entry = pending[code.trim()]
 
@@ -2087,6 +2294,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: 'Agent not found' }, 404)
       return true
     }
+    // OWNERGATE2-1104: writes a new invite into invites.json and returns its token; whoever redeems it is approved
+    // into allowFrom automatically, so minting one is granting access.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Creating a channel invite needs the dashboard login (an owner session).')
+      return true
+    }
     let botName: string | undefined
     if (provider === 'telegram') {
       botName = name === MAIN_AGENT_ID
@@ -2107,7 +2320,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, result)
     } catch (err) {
       logger.error({ err }, 'Failed to create invite')
-      json(res, { error: 'Failed to create invite' }, 500)
+      // The detail names a refused unreadable/invalid access.json or
+      // invites.json (ACCESSREADFAIL1030) -- path only, never contents.
+      json(res, { error: 'Failed to create invite', detail: err instanceof Error ? err.message : String(err) }, 500)
     }
     return true
   }
@@ -2117,6 +2332,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const [name, provider] = inviteCreateMatch
     if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) {
       json(res, { error: 'Agent not found' }, 404)
+      return true
+    }
+    // OWNERGATE2-1104: returns the live invite tokens (and prunes invites.json); a listed token auto-approves whoever
+    // redeems it, so reading them is as strong as minting one.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Listing channel invites needs the dashboard login (an owner session).')
       return true
     }
     const accessPath = resolveAccessPath(name, provider)
@@ -2151,6 +2372,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: 'Agent not found' }, 404)
       return true
     }
+    // OWNERGATE2-1104: rewrites invites.json; every channel-access write is owner-only (tech lead decision), the
+    // revoke included, so a sub-agent cannot cancel the owner's invites either.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Revoking a channel invite needs the dashboard login (an owner session).')
+      return true
+    }
     const accessPath = resolveAccessPath(name, provider)
     const ok = revokeInvite(accessPath, token)
     if (!ok) { json(res, { error: 'Invite not found' }, 404); return true }
@@ -2172,12 +2399,19 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: 'Agent not found' }, 404)
       return true
     }
+    // OWNERGATE2-1104: rewrites access.json (allowFrom or groups) and removes the approved/ marker; removing the
+    // owner's own entry cuts them off, so it is owner-only (new and legacy route alike).
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Removing an allowed user or group needs the dashboard login (an owner session).')
+      return true
+    }
     const chDir = name === MAIN_AGENT_ID
       ? channelStateDir(provider)
       : channelStateDir(provider, agentDir(name))
     const accessPath = join(chDir, 'access.json')
+    const access = readChannelAccessForWrite(res, accessPath)
+    if (!access) return true
     try {
-      const access = JSON.parse(readFileOr(accessPath, '{}'))
       if (kind === 'user') {
         access.allowFrom = (access.allowFrom || []).filter((s: string) => s !== id)
         // safeJoin blocks a traversal id (e.g. "..%2F..%2Ftmp%2Fvictim") from
@@ -2214,6 +2448,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const name = decodeURIComponent(chReqApproveMatch[1])
     const reqId = Number(chReqApproveMatch[2])
     if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // OWNERGATE2-1104: adds the Slack channel to access.json (with allowFromAll everyone in it may talk to the
+    // agent) and marks the request approved; owner-only.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Approving a channel request needs the dashboard login (an owner session).')
+      return true
+    }
 
     const body = await readBody(req)
     let opts: { requireMention?: boolean; allowFromAll?: boolean } = {}
@@ -2227,18 +2467,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (provider !== 'slack') { json(res, { error: 'Only Slack agents support channel requests' }, 400); return true }
 
     const accessPath = resolveAccessPath(name, provider)
+    // A missing file starts from the default policy, as before. An existing
+    // file that cannot be read or parsed is refused (ACCESSREADFAIL1030): it
+    // used to be renamed to .corrupt-* and replaced by a fresh one, which
+    // dropped the live allowFrom/groups -- for a read error too, not only for
+    // a corrupt file.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let access: any = { dmPolicy: 'allowlist', allowFrom: [], groups: {} }
+    if (existsSync(accessPath)) {
+      access = readChannelAccessForWrite(res, accessPath)
+      if (!access) return true
+    }
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let access: any = { dmPolicy: 'allowlist', allowFrom: [], groups: {} }
-      if (existsSync(accessPath)) {
-        try {
-          access = JSON.parse(readFileSync(accessPath, 'utf-8'))
-        } catch (parseErr) {
-          const backupPath = `${accessPath}.corrupt-${Math.floor(Date.now() / 1000)}`
-          try { renameSync(accessPath, backupPath) } catch { /* best effort */ }
-          logger.warn({ parseErr, accessPath, backupPath }, 'Corrupt access.json backed up, starting fresh')
-        }
-      }
       if (!access.channels) access.channels = {}
 
       const channelConfig: Record<string, unknown> = { requireMention: opts.requireMention !== false }
@@ -2263,6 +2503,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const name = decodeURIComponent(chReqDenyMatch[1])
     const reqId = Number(chReqDenyMatch[2])
     if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // OWNERGATE2-1104: resolves the Slack channel request in the DB (denied); every channel-access write is
+    // owner-only (tech lead decision), so a sub-agent cannot decide the owner's pending requests.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Denying a channel request needs the dashboard login (an owner session).')
+      return true
+    }
     if (updateChannelRequestStatus(reqId, 'denied')) {
       json(res, { ok: true })
     } else {
@@ -2276,6 +2522,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   const authInitMatch = path.match(/^\/api\/agents\/([^/]+)\/auth\/init$/)
   if (authInitMatch && method === 'POST') {
     const name = decodeURIComponent(authInitMatch[1])
+    // OWNERGATE3-1104: types /login into the agent's tmux pane and returns the login URL scraped from it, i.e. lets
+    // the caller bind the agent to a Claude account of their choosing; owner-only, before any lookup or tmux call.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Starting an agent\'s Claude login needs the dashboard login (an owner session).')
+      return true
+    }
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     if (!isAgentRunning(name)) { json(res, { error: 'Agent is not running' }, 400); return true }
     const session = agentSessionName(name)
@@ -2320,7 +2572,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // agents on Claude Code 2.1.193, where a `--continue` resume does not load
     // the --channels plugin MCP server (agent comes up deaf).
     let startFresh = false
-    try { startFresh = JSON.parse((await readBody(req)).toString() || '{}').fresh === true } catch {}
+    // A body that did not arrive in full is refused, not read as "no options".
+    const startBody = await readBodyOrRefuse(req, res)
+    if (!startBody) return true
+    try { startFresh = JSON.parse(startBody.toString() || '{}').fresh === true } catch {}
     const result = await startAgentProcess(name, { fresh: startFresh })
     // Record operator intent so the monitor keeps this agent up across shared
     // tmux-server restarts / reboots (see agent-desired-state.ts).
@@ -2446,8 +2701,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // RESTARTWAKE927: a --continue restart wakes the agent once it is up; a
     // caller that wakes the agent itself can send { "wake": false } (no caller
     // in this repository does today). See restart-wake.ts.
-    let restartBody = ''
-    try { restartBody = (await readBody(req)).toString() } catch {}
+    // A body that did not arrive in full is refused, not read as "no options".
+    const restartRaw = await readBodyOrRefuse(req, res)
+    if (!restartRaw) return true
+    const restartBody = restartRaw.toString()
     const result = await restartAgentProcess(name, restartOptsFromBody(restartBody))
     if (result.ok) { json(res, { ok: true }); return true }
     json(res, { error: result.error }, 400)
@@ -2477,18 +2734,23 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // before the generic /api/agents/:name GET further down, or "export-all"
   // would be read as an agent name.
   if (path === '/api/agents/export-all' && method === 'GET') {
-    const names = listAgentNames().filter((n) => n !== MAIN_AGENT_ID)
-    if (names.length === 0) { json(res, { error: 'No agents to export' }, 404); return true }
     const includeSecrets = /[?&]secrets=(1|true)\b/.test(req.url || '')
     const work = mkdtempSync(join(tmpdir(), 'marveen-fleet-dl-'))
     const outPath = join(work, fleetBundleFilename())
     try {
-      exportAllAgentsBundle(outPath, names, {
-        includeSecrets,
-        exportedBy: MAIN_AGENT_ID,
-        exportedAt: new Date().toISOString(),
+      // The tar reads every agent's skills: it waits on the skills directory queue, like the fleet export.
+      const data = await serializeSkillsDir(() => {
+        // Listed on the queue: the bundle holds the agents the operations queued before it left.
+        const names = listAgentNames().filter((n) => n !== MAIN_AGENT_ID)
+        if (names.length === 0) return null
+        exportAllAgentsBundle(outPath, names, {
+          includeSecrets,
+          exportedBy: MAIN_AGENT_ID,
+          exportedAt: new Date().toISOString(),
+        })
+        return readFileSync(outPath)
       })
-      const data = readFileSync(outPath)
+      if (!data) { json(res, { error: 'No agents to export' }, 404); return true }
       res.writeHead(200, {
         'Content-Type': 'application/gzip',
         'Content-Disposition': `attachment; filename="${fleetBundleFilename()}"`,
@@ -2517,12 +2779,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const work = mkdtempSync(join(tmpdir(), 'marveen-agent-dl-'))
     const outPath = join(work, bundleFilename(name))
     try {
-      exportAgentBundle(name, outPath, {
-        includeSecrets,
-        exportedBy: MAIN_AGENT_ID,
-        exportedAt: new Date().toISOString(),
+      // The tar reads the agent's skills: it waits on the skills directory queue.
+      const data = await serializeSkillsDir(() => {
+        // Checked again on the queue: a delete queued before this export may have removed the agent.
+        if (!existsSync(agentDir(name))) return null
+        exportAgentBundle(name, outPath, {
+          includeSecrets,
+          exportedBy: MAIN_AGENT_ID,
+          exportedAt: new Date().toISOString(),
+        })
+        return readFileSync(outPath)
       })
-      const data = readFileSync(outPath)
+      if (!data) { json(res, { error: 'Agent not found' }, 404); return true }
       res.writeHead(200, {
         'Content-Type': 'application/gzip',
         'Content-Disposition': `attachment; filename="${bundleFilename(name)}"`,
@@ -2540,6 +2808,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   }
 
   if (path === '/api/agents/import' && method === 'POST') {
+    // APIAGENTWRITE1104 / OWNERGATE2-1104: an import writes a whole agent directory (CLAUDE.md, .mcp.json,
+    // settings.json, skills): with overwrite it replaces an existing agent, without it it creates one, the same
+    // change POST /api/agents and PUT /api/agents/:name gate. Owner-only in every case, before the upload is read.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Importing an agent needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     const contentType = req.headers['content-type'] || ''
     let bundle: Buffer | undefined
@@ -2559,11 +2834,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       overwrite = /[?&]overwrite=(1|true)\b/.test(url)
     }
     if (!bundle || bundle.length === 0) { json(res, { error: 'No bundle uploaded' }, 400); return true }
+    const upload: Buffer = bundle
     try {
       // One endpoint accepts either format: peek the manifest, then dispatch to
       // the single-agent or whole-fleet importer.
-      if (peekBundleKind(bundle) === 'fleet') {
-        const result = importAllAgentsBundle(bundle, { overwrite })
+      // The importers write agent directories, skills included: they wait on the skills directory queue.
+      if (peekBundleKind(upload) === 'fleet') {
+        const result = await serializeSkillsDir(() => importAllAgentsBundle(upload, { overwrite }))
         // An imported agent is a NEW agent on this machine: the bundle carries
         // the agent directory, never store/context-guard.json. Same rule as
         // creation (fleet policy, 2026-09-08) and idempotent, so re-importing over an
@@ -2587,7 +2864,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         return true
       }
 
-      const result = importAgentBundle(bundle, { overrideName: overrideName || undefined, overwrite })
+      const result = await serializeSkillsDir(() => importAgentBundle(upload, { overrideName: overrideName || undefined, overwrite }))
       seedContextGuardForNewAgent(result.name)
       logger.info({ name: result.name, overwritten: result.overwritten, secrets: result.manifest.includesSecrets }, 'Agent imported from bundle')
       json(res, {
@@ -2636,6 +2913,21 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const fieldCheck = checkAgentPutFields(name, data)
     if (!fieldCheck.ok) {
       json(res, { error: fieldCheck.message, rejected: fieldCheck.rejected, writable: AGENT_PUT_WRITABLE_FIELDS }, 400)
+      return true
+    }
+
+    // APIAGENTWRITE1104: the owner gate runs BEFORE the first write. The fields below are written one after the
+    // other, so a gate further down would leave the earlier ones on disk; here a refused body writes nothing, the
+    // token-writable model included.
+    const ownerFields = agentPutOwnerFields(data as Record<string, unknown>)
+    if (ownerFields.length > 0 && !mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, `Changing ${ownerFields.join(', ')} of an agent needs the dashboard login (an owner session); the shared access token can change only model and modelProfile.`, { fields: ownerFields })
+      return true
+    }
+    // As in the POST, and before the first write: an agent set to a provider that does not exist would not start.
+    // Clearing it (null or '') stays allowed, and a body without the field is not checked.
+    if (typeof data.customProvider === 'string' && data.customProvider.trim() && !loadCustomProvider(data.customProvider.trim())) {
+      json(res, { error: `Unknown custom provider: ${data.customProvider.trim()}` }, 400)
       return true
     }
 
@@ -2746,6 +3038,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (isMainChannelsAgent(name)) { json(res, { error: 'The main agent cannot be deleted' }, 400); return true }
     const dir = agentDir(name)
     if (!existsSync(dir)) { json(res, { error: 'Agent not found' }, 404); return true }
+    // OWNERGATE2-1104: stops the agent and removes its whole directory, irreversibly; owner-only, before the desired
+    // run-state, the stop or the removal is touched.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Deleting an agent needs the dashboard login (an owner session).')
+      return true
+    }
     // Clear the desired run-state FIRST, before anything yields. Deleting an
     // agent is at least as strong a statement of intent as stopping one, so it
     // must clear the state the same way /stop does: without this the name
@@ -2773,7 +3071,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // stopAgentProcess() reads config from the dir (remote host, channel
     // provider) for its orphan reap, so it must run while the dir still exists.
     if (isAgentRunning(name)) await stopAgentProcess(name)
-    rmSync(dir, { recursive: true, force: true })
+    // An assign may be copying a skill into this directory: the removal waits on the skills directory queue.
+    await serializeSkillsDir(async () => {
+      // Started again while the removal waited (by hand: the reconciler no longer wants it): stop it first,
+      // for the same reason as above.
+      if (isAgentRunning(name)) await stopAgentProcess(name)
+      rmSync(dir, { recursive: true, force: true })
+    })
     cleanupTeamReferences(name)
     json(res, { ok: true })
     return true
@@ -2792,6 +3096,12 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // Body: { responseMode?: 'text'|'voice'|'auto', voiceModel?: string, transcribeInbound?: boolean }
   if (voiceConfigMatch && method === 'PUT') {
     const name = decodeURIComponent(voiceConfigMatch[1])
+    // OWNERGATE3-1104: writes the agent's voice config (reply as text or voice, which voice model, whether inbound
+    // voice is transcribed), i.e. how the agent talks to the owner's channel; owner-only, before the body is read.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Changing an agent\'s voice settings needs the dashboard login (an owner session).')
+      return true
+    }
     if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     const body = await readBody(req)
     let data: { responseMode?: string; voiceModel?: string; transcribeInbound?: unknown }

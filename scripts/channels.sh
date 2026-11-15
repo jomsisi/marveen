@@ -598,90 +598,51 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
 fi
 # LAUNCHGATE1008-END: everything below launches.
 
-# Self-healing guard: ensure PLUGIN_ID is enabled in the PROJECT settings.json
-# before launch. A PR review-reset or branch-switch that reverts
-# .claude/settings.json can silently drop the entry and disable the channel
-# plugin, leaving Claude running with no active channel; this re-adds it.
-#
-# Deliberately PROJECT-SCOPED only ($INSTALL_DIR/.claude/settings.json). We do
-# NOT force-enable in the user-global ~/.claude/settings.json: that would make
-# EVERY Claude context (all sub-agent sessions) load the channel plugin, and a
-# provider that opens a single Socket-Mode connection (Slack) would then have
-# multiple sessions fighting over one workspace socket -- a duplicate-socket /
-# 409 hazard.
-_ensure_plugin_enabled() {
-  local settings_file="$1"
-  [ -f "$settings_file" ] || return 0
-  python3 - "$settings_file" "$PLUGIN_ID" <<'PYEOF'
-import json, os, sys, tempfile
-
-path, plugin_id = sys.argv[1], sys.argv[2]
-
-# SKIP-ON-PARSE-FAILURE: if the file is unreadable or not valid JSON (e.g. a
-# concurrent writer caught mid-write, or a genuinely corrupt file), NEVER fall
-# back to an empty object and write it back -- that would clobber the user's
-# hooks / model / permissions. Leave the file untouched; the next launch retries.
-try:
-    with open(path, "r") as f:
-        data = json.load(f)
-except (OSError, ValueError):
-    print("channels.sh: settings.json unreadable/invalid, guard skipped: %s" % path,
-          file=sys.stderr, flush=True)
-    sys.exit(0)
-
-if not isinstance(data, dict):
-    sys.exit(0)
-
-plugins = data.get("enabledPlugins")
-if not isinstance(plugins, dict):
-    plugins = {}
-    data["enabledPlugins"] = plugins
-
-if plugins.get(plugin_id) is True:
-    sys.exit(0)  # already enabled -> no write, no needless churn
-
-plugins[plugin_id] = True
-
-# ATOMIC write: serialize to a temp file in the SAME directory, then os.replace
-# (atomic rename on POSIX). A reader -- or the hook-registration guard (#565)
-# running concurrently -- never observes a half-written settings.json.
-dir_name = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(dir=dir_name, prefix=".settings-", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-except BaseException:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
-
-print("channels.sh: enabled %s in %s" % (plugin_id, path), flush=True)
-PYEOF
-}
-_ensure_plugin_enabled "$INSTALL_DIR/.claude/settings.json"
-unset -f _ensure_plugin_enabled
+# INSTALLDIRTYTREE1103: the primary channel plugin is enabled through the same
+# launch-time --settings file as the co-listen extras (main_extra_settings_flag
+# below), NOT by writing the TRACKED .claude/settings.json. The self-healing
+# guard that used to live here rewrote that file with json.dump(indent=2) --
+# ~500 lines of reformatting on every Slack install -- so every customer tree
+# came up dirty and every update went down the stash path (marveen2, 11-03:
+# the stash pop conflicted inside settings.json). A --settings file outranks the
+# project scope (measured, SLACKDMVESZT1006) and only this session reads it, so
+# the review-reset / branch-switch case the guard covered is covered too: the
+# flag file is rewritten on every launch.
 
 # Build the extra --channels args from CHANNEL_PLUGINS_EXTRA (space-separated
 # plugin IDs). Each becomes an additional `plugin:<id>` token appended to the
 # --channels list. `claude --channels` accepts a space-separated plugin list,
 # so one session can co-listen on several providers (e.g. Telegram + Discord).
-# NOTE: co-listen also requires each extra plugin to be enabled in
-# .claude/settings.json enabledPlugins (true) -- CHANNEL_PLUGINS_EXTRA alone is
-# not enough; Claude Code only starts plugins marked true there.
+# NOTE: co-listen also requires each extra plugin to be ENABLED --
+# CHANNEL_PLUGINS_EXTRA alone is not enough; Claude Code only starts plugins
+# marked true. The --settings file below carries that true for the primary and
+# every extra.
+# GROMZOMAINAGENT1106: the gromzo-channel id stays only when mxd's agent.sock is usable and the main id is a
+# valid mxd slug (scripts/main-gromzo-launch.sh); its MXD_AGENT/MXD_SCOPE go in as exports of THIS launch.
+GROMZO_ENV=""
+# shellcheck source=scripts/main-gromzo-launch.sh
+if . "$INSTALL_DIR/scripts/main-gromzo-launch.sh" 2>/dev/null; then
+  # shellcheck disable=SC2086 # word-split on purpose: space-separated plugin ids
+  CHANNEL_PLUGINS_EXTRA="$(main_gromzo_filter_ids "$MAIN_AGENT_ID" $CHANNEL_PLUGINS_EXTRA)"
+  # shellcheck disable=SC2086
+  GROMZO_ENV="$(main_gromzo_env "$MAIN_AGENT_ID" $CHANNEL_PLUGINS_EXTRA)"
+else
+  # No helper (a half-updated tree): every other extra (Slack co-listen) stays; only the gromzo id goes, since
+  # it must never start without its exports (Dani 71308 (2)).
+  # shellcheck disable=SC2086
+  CHANNEL_PLUGINS_EXTRA="$(printf '%s\n' $CHANNEL_PLUGINS_EXTRA | grep -vxF 'gromzo-channel@gromzo-local' | tr '\n' ' ')"
+  CHANNEL_PLUGINS_EXTRA="${CHANNEL_PLUGINS_EXTRA% }"
+fi
 EXTRA_CHANNELS=""
 for _p in $CHANNEL_PLUGINS_EXTRA; do
   [ -n "$_p" ] && EXTRA_CHANNELS="$EXTRA_CHANNELS plugin:$_p"
 done
 unset _p
-# SLACKDMVESZT1006: enable the extras for THIS session only, via a --settings
-# file (see the helper's header for why not a settings layer).
+# SLACKDMVESZT1006: enable the primary and the extras for THIS session only,
+# via a --settings file (see the helper's header for why not a settings layer).
 . "$INSTALL_DIR/scripts/main-extra-plugins-settings.sh"
 # shellcheck disable=SC2086 # word-split on purpose: space-separated plugin ids
-EXTRA_SETTINGS_FLAG="$(main_extra_settings_flag "$INSTALL_DIR" $CHANNEL_PLUGINS_EXTRA)"
+EXTRA_SETTINGS_FLAG="$(main_extra_settings_flag "$INSTALL_DIR" "$PLUGIN_ID" $CHANNEL_PLUGINS_EXTRA)"
 
 # ROOT-CAUSE NOTE (kali-linux WSL, claude-code 2.1.152, 2026-05-27):
 # Inbound MCP notifications from the `--channels` plugin go through a SECOND
@@ -852,11 +813,8 @@ claude_install() {
 # one machine, the same second-install vector that broke the install four
 # times in one day in July.
 #
-# Auto-updating the native install from here is ALSO off, on purpose:
-# `claude update` on a native install can misdetect itself as npm-global and
-# reinstall the npm package, re-creating the very second install this block
-# prevents. Upgrading a native build is a deliberate step (`claude install
-# stable`), not a side effect of a boot.
+# The native install is updated by `claude update`, never by npm, and only
+# behind the guard in claude_native_update below (NATIVEAUTOUPD1642).
 CLAUDE_NATIVE_ROOT="$HOME/.local/share/claude/versions"
 claude_realpath() {
   python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null \
@@ -995,9 +953,140 @@ claude_native_behind_npm_note() {
 # takes effect on the next restart, as before.
 DAILY_CLAUDE_CHECK=0
 claude_daily_check_start() {
-  [ "$DAILY_CLAUDE_CHECK" = "1" ] || return 0
-  DAILY_CLAUDE_CHECK=0
-  claude_install "daily check" &
+  case "$DAILY_CLAUDE_CHECK" in
+    1) DAILY_CLAUDE_CHECK=0; claude_install "daily check" & ;;
+    native) DAILY_CLAUDE_CHECK=0; claude_native_update "daily check" & ;;
+  esac
+}
+
+# NATIVEAUTOUPD1642 (#1642): a native host is updated once a day with
+# `claude update`, behind a guard. Until this, a native host never updated at
+# all (the reporter's sat on 2.1.284 from late September).
+#
+# The earlier worry was that `claude update` on a native install misdetects
+# itself as npm-global and installs a second, npm copy. Measured 2026-10-29 on
+# an isolated native 2.1.169 (macOS arm64, npm on the PATH, with and without
+# DISABLE_AUTOUPDATER=1): it moved ~/.local/bin/claude to versions/2.1.312,
+# kept the old version dir, created no npm copy, and its only npm call was a
+# read-only `npm --global config get prefix`; a second run said "up to date",
+# rc 0. The reporter measured the same on Ubuntu (2.1.284 -> 2.1.296). The
+# guard keeps that a checked fact on every run rather than an assumption:
+#   - the launcher still points into the versions dir and its build runs
+#     `--version`;
+#   - no npm-global claude appeared that was not there before;
+#   - `claude` on the PATH is still the launcher.
+# Any miss puts the launcher back on the build it pointed at before and is
+# logged as FAILED in channels-failures.log. The swap is a symlink re-point,
+# not a file replaced in place, and it runs after the launch like the npm path
+# (DAILYRACE1024), so the new build takes effect on the next restart.
+#
+# It has its own stamp on purpose: $CLAUDE_UPDATE_STAMP means "npm installed
+# after this build" to claude_host_is_native_now and
+# claude_native_behind_npm_note, and a native update writing it would read as
+# a host that went back to npm.
+#
+# `claude update` and `--version` run with an empty CLAUDE_CONFIG_DIR and
+# TELEGRAM_STATE_DIR: a child claude that loads the channel plugin takes the
+# bot poller from the running session (docs/mcp-list-channel-plugin.md). The
+# update itself works from $HOME, not the config dir (measured above).
+#
+# On by default: the owner's decision (#1642, 2026-10-30, option A); it is made HERE and
+# nowhere else. CLAUDE_NATIVE_AUTOUPDATE=1 / =0 in .env overrides it per host.
+CLAUDE_NATIVE_AUTOUPDATE_DEFAULT=1
+CLAUDE_NATIVE_UPDATE_STAMP="$INSTALL_DIR/store/.claude-native-update-stamp"
+claude_native_autoupdate_on() {
+  local v=""
+  [ -f "$INSTALL_DIR/.env" ] && v="$(grep -E '^CLAUDE_NATIVE_AUTOUPDATE=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
+  case "$v" in
+    1|0) ;;
+    *) v="$CLAUDE_NATIVE_AUTOUPDATE_DEFAULT" ;;
+  esac
+  [ "$v" = "1" ]
+}
+claude_under_native_root() {  # claude_under_native_root <resolved path>
+  local root
+  root="$(claude_realpath "$CLAUDE_NATIVE_ROOT")"
+  [ -n "$1" ] && [ -n "$root" ] || return 1
+  case "$1" in
+    "$root"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+claude_npm_copy_state() {
+  local npm_root
+  command -v npm >/dev/null 2>&1 || { echo "no-npm"; return 0; }
+  npm_root="$(npm root -g 2>/dev/null)"
+  if [ -n "$npm_root" ] && [ -d "$npm_root/@anthropic-ai/claude-code" ]; then echo "present"; else echo "absent"; fi
+}
+# claude_native_runs <path>: the build is there and answers --version, in the
+# same plugin-free environment as the update.
+claude_native_runs() {
+  local iso="$INSTALL_DIR/store/.claude-native-update-env"
+  [ -n "$1" ] && [ -x "$1" ] || return 1
+  CLAUDE_CONFIG_DIR="$iso/config" TELEGRAM_STATE_DIR="$iso/telegram" "$1" --version </dev/null >/dev/null 2>&1
+}
+claude_native_update() {
+  local why="$1" launcher="$HOME/.local/bin/claude" iso="$INSTALL_DIR/store/.claude-native-update-env"
+  local l0 l1 t1 n0 n1 out rc reason="" tmo="" target how v
+  l0="$(readlink "$launcher" 2>/dev/null)"
+  n0="$(claude_npm_copy_state)"
+  mkdir -p "$iso/config" "$iso/telegram" 2>/dev/null
+  # One attempt a day, success or not: a failing update is retried tomorrow,
+  # not on every restart.
+  : > "$CLAUDE_NATIVE_UPDATE_STAMP" 2>/dev/null
+  command -v timeout >/dev/null 2>&1 && tmo="timeout 900"
+  echo "$(date '+%F %T') claude update START (native, $why): ${l0##*/}" >&2
+  out="$(CLAUDE_CONFIG_DIR="$iso/config" TELEGRAM_STATE_DIR="$iso/telegram" $tmo "$launcher" update </dev/null 2>&1)"
+  rc=$?
+  l1="$(readlink "$launcher" 2>/dev/null)"
+  t1="$(claude_realpath "$launcher")"
+  n1="$(claude_npm_copy_state)"
+  if [ "$rc" != "0" ]; then
+    reason="claude update exited $rc: $(printf '%s' "$out" | tail -1)"
+  elif ! claude_under_native_root "$t1"; then
+    reason="the launcher no longer points into $CLAUDE_NATIVE_ROOT (${t1:-<nothing>})"
+  elif ! claude_native_runs "$t1"; then
+    reason="the new build does not run --version ($t1)"
+  elif [ "$n1" != "$n0" ]; then
+    reason="an npm-global claude appeared (npm copy: $n0 -> $n1)"
+  elif [ "$(command -v claude 2>/dev/null)" != "$launcher" ]; then
+    reason="claude on the PATH is no longer $launcher ($(command -v claude 2>/dev/null))"
+  fi
+  if [ -z "$reason" ]; then
+    echo "$(date '+%F %T') claude update OK (native, $why): ${l0##*/} -> ${l1##*/}" >&2
+    return 0
+  fi
+  if [ -n "$l0" ] && [ "$l1" != "$l0" ]; then
+    # Back to the previous build only if it is still there and runs: an update
+    # that pruned it would otherwise leave a dangling launcher, and the next
+    # start's relink would pick the newest dir -- the broken one (review #2339).
+    # Failing that, the newest build that runs; failing that, say so and leave
+    # the launcher alone rather than claim a restore.
+    target=""
+    if claude_native_runs "$l0"; then
+      target="$l0"; how="launcher restored to ${l0##*/}"
+    else
+      for v in $(ls -1 "$CLAUDE_NATIVE_ROOT" 2>/dev/null | sort -V -r); do
+        if claude_native_runs "$CLAUDE_NATIVE_ROOT/$v"; then target="$CLAUDE_NATIVE_ROOT/$v"; break; fi
+      done
+      if [ -n "$target" ]; then
+        how="the previous build ${l0##*/} is gone or does not run; launcher set to the newest build that runs, ${target##*/}"
+      else
+        how="the previous build ${l0##*/} is gone or does not run, and NO native build runs; launcher left on ${l1##*/}, claude will not start until a working build is installed (claude install stable)"
+      fi
+    fi
+    if [ -n "$target" ] && [ "$target" != "$l1" ]; then
+      command -v chflags >/dev/null 2>&1 && chflags -h nouchg "$launcher" 2>/dev/null
+      ln -sfn "$target" "$launcher" 2>/dev/null || how="moving the launcher to $target FAILED"
+    fi
+    reason="$reason; $how"
+  fi
+  if [ "$n1" = "present" ] && [ "$n0" != "present" ]; then
+    reason="$reason; the npm copy is still installed at $(npm root -g 2>/dev/null)/@anthropic-ai/claude-code (npm uninstall -g @anthropic-ai/claude-code removes it)"
+  fi
+  echo "$(date '+%F %T') claude update FAILED (native, $why): $reason" >&2
+  { echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh: claude update FAILED (native, $why): $reason" >> "$INSTALL_DIR/store/channels-failures.log"; } 2>/dev/null
+  return 1
 }
 
 if ! command -v claude >/dev/null 2>&1; then
@@ -1005,8 +1094,14 @@ if ! command -v claude >/dev/null 2>&1; then
     claude_install "binary missing -- self-heal"
   fi
 elif claude_is_native; then
-  echo "$(date '+%F %T') claude update SKIPPED: native install, npm path disabled" >&2
   claude_native_behind_npm_note
+  if [ "$AVX_LESS" = "0" ] && claude_native_autoupdate_on \
+     && [ -z "$(find "$CLAUDE_NATIVE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
+    # Due, not started: see DAILYRACE1024 above.
+    DAILY_CLAUDE_CHECK=native
+  elif ! claude_native_autoupdate_on; then
+    echo "$(date '+%F %T') claude update SKIPPED: native install, auto-update off (CLAUDE_NATIVE_AUTOUPDATE)" >&2
+  fi
 elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
   # AVX-less hosts are excluded on purpose: their claude is pinned, and
   # "keep it current" is exactly what breaks them.
@@ -1618,7 +1713,7 @@ $TMUX kill-session -t "=$SESSION:" 2>/dev/null || true
 # MAIN session's channel state dir. The -g -u after the launch cleans a server
 # polluted earlier.
 env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-  "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+  "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
 _tmux_set_auth_globals
 # remain-on-exit: without this, if the pane's claude process dies for ANY
@@ -1684,7 +1779,17 @@ _answer_accept_dialog() {
 }
 
 _eperm_restarted=0
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+# #2389: the guard watches the pane for CHANNELS_BOOT_GUARD_S seconds (default
+# 90, was a fixed 12). REPORTED (2026-10-31, Linux/Discord): on a lagging boot
+# the trust dialog was drawn after the 12 s window, nobody answered it, and the
+# session sat on it until the /rename step. The loop still leaves at once on the
+# ready banner, so a normal boot does not wait longer. Not a positive integer ->
+# the default.
+_boot_guard_s="${CHANNELS_BOOT_GUARD_S:-90}"
+case "$_boot_guard_s" in ''|*[!0-9]*|0) _boot_guard_s=90 ;; esac
+i=0
+while [ "$i" -lt "$_boot_guard_s" ]; do
+  i=$((i + 1))
   sleep 1
   pane=$($TMUX capture-pane -t "=$SESSION:" -p 2>/dev/null || true)
   case "$pane" in
@@ -1710,7 +1815,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
         env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
-          "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+          "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
         # See the primary new-session above: remain-on-exit keeps the pane
         # (and session) alive if claude dies early, so the scheduled relaunch
         # can always find it. This is the /tmp-fallback launch path, same fix.
@@ -1729,19 +1834,22 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
       sleep 1
       continue
       ;;
+    # 2.1.296 dropped "channel" and the colon from the ready banner
+    # ("Listening for messages from <x>"); match both wordings.
+    # Before the welcome branch (Dani 63870, #2389): a pane that shows the ready
+    # banner is never answered with the welcome's blind Enter, which would land
+    # in the live input box.
+    *"Listening for channel messages"*|*"Listening for messages from"*)
+      break
+      ;;
     *"Welcome to Claude Code"*)
       $TMUX send-keys -t "=$SESSION:" Enter
       sleep 1
       continue
       ;;
-    # 2.1.296 dropped "channel" and the colon from the ready banner
-    # ("Listening for messages from <x>"); match both wordings.
-    *"Listening for channel messages"*|*"Listening for messages from"*)
-      break
-      ;;
   esac
 done
-unset _eperm_restarted
+unset _eperm_restarted _boot_guard_s
 
 # Set agent name once the session is ready. (/remote-control dropped: the operator no
 # longer uses Remote Control.)

@@ -8,7 +8,7 @@
 # the HTTP status AND the returned message id, and RETRIES on failure. A message counts as sent only
 # when an id came back.
 #
-# Usage:  cat <<'EOF' | bash scripts/agent-msg.sh [--priority high|normal] <from> <to> -
+# Usage:  cat <<'EOF' | bash scripts/agent-msg.sh [--unblocks] [--priority high|normal] <from> <to> -
 #         <content, any characters>
 #         EOF
 #
@@ -41,6 +41,15 @@
 #     and a stderr NOTICE says DOWNGRADED. The switch goes BEFORE <from>; an empty value, or the switch
 #     anywhere else (after the sender, the recipient or the content), also fails here, before anything
 #     is sent.
+#   --unblocks (UNBLOCKS925): the MAIN agent's one named case for reaching a BUSY pane: the message
+#     releases a blocker of the recipient's current work (an approval, a credential, a decision it is
+#     waiting on). The server stores affects_current_work = 'unblocks'; the router then types a SHORT
+#     notice (not the full text) without waiting for an idle pane. Any sender other than the main agent
+#     gets a 400 from the server. It is never inferred from the text. The switch goes FIRST, before
+#     --priority and <from>; anywhere else it fails here, before anything is sent.
+#     The server requires the same key as urgent delivery: a FULL device key listed in
+#     MESSAGE_URGENT_DEVICE_IDS. Point MARVEEN_TOKEN_FILE at that key's file; the shared dashboard
+#     token gets a 403 and nothing is stored.
 #
 # LOG FORMAT, store/agent-msg-failures.log (tab-separated, one line per failure):
 #   <YYYY-MM-DD HH:MM:SS>  FAIL  from=<a>  to=<b>  url=<endpoint>  http=<code>  resp=<first 200 bytes>
@@ -76,6 +85,8 @@ TOKEN_FILE="${MARVEEN_TOKEN_FILE:-$BASE/store/.dashboard-token}"
 URL="${API_BASE}/api/messages"
 LOG="$BASE/store/agent-msg-failures.log"
 
+UNBLOCKS=0
+if [ "${1:-}" = "--unblocks" ]; then UNBLOCKS=1; shift; fi
 PRIORITY=""; PRIORITY_GIVEN=0
 case "${1:-}" in
   --priority) PRIORITY_GIVEN=1; PRIORITY="${2:-}"; if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
@@ -90,6 +101,7 @@ fi
 for arg in "$@"; do
   case "$arg" in
     --priority|--priority=*) echo "FAIL: --priority goes before <from>: agent-msg.sh [--priority high|normal] <from> <to> <content>; nothing was sent"; exit 1 ;;
+    --unblocks) echo "FAIL: --unblocks goes first, before <from>: agent-msg.sh [--unblocks] [--priority high|normal] <from> <to> <content>; nothing was sent"; exit 1 ;;
   esac
 done
 FROM="${1:?from required}"; TO="${2:?to required}"; C="${3:?content required (or - for STDIN)}"
@@ -130,6 +142,16 @@ fi
 
 [ -r "$TOKEN_FILE" ] || { echo "FAIL: no token file at $TOKEN_FILE"; exit 1; }
 TOKEN="$(cat "$TOKEN_FILE")"
+# An exported TOKEN in the caller's environment keeps its export attribute through the assignment above (Dani
+# 65583, measured): drop it, so no child process (curl among them) gets the dashboard token in its environment.
+export -n TOKEN
+[ -n "$TOKEN" ] || { echo "FAIL: the token file at $TOKEN_FILE is empty; nothing was sent"; exit 1; }
+# VOICETOKENLEAK1101 round 3 (#2080 review "Token on argv: what remains", Samu 65565, Dani 65569): the token never
+# goes on curl's argv, which ps shows to every process of the same user, and never on disk: curl reads the
+# Authorization header from a process substitution (-H @<(printf ...); printf is a shell builtin, so it starts no
+# process and is in no argv; measured on /usr/bin/curl 8.7.1, -H @file exists since curl 7.55.0). The JSON body (the
+# message text) goes on stdin (--data-binary @-), so it is off the argv too; the /dev/fd channel does not clash with
+# it. TOKEN is a plain shell variable, never exported, so no child process sees it in its environment.
 
 # --- Homoglyph gate, BEFORE the payload is built (MSGGATE924) --------------
 # On the RAW text, not on the JSON: json.dumps escapes a Cyrillic letter into
@@ -188,15 +210,16 @@ else
   echo "WARN: homoglyph checker not found at $HG -- sending UNCHECKED." >&2
 fi
 
-BODY="$(FROM="$FROM" TO="$TO" C="$C" P="$PRIORITY" python3 -c 'import json,os
+BODY="$(FROM="$FROM" TO="$TO" C="$C" P="$PRIORITY" U="$UNBLOCKS" python3 -c 'import json,os
 d={"from":os.environ["FROM"],"to":os.environ["TO"],"content":os.environ["C"]}
 if os.environ.get("P"): d["priority"]=os.environ["P"]
+if os.environ.get("U")=="1": d["affects_current_work"]="unblocks"
 print(json.dumps(d))')"
 
 attempt=0; max=3; CODE=""; ID=""
 while [ "$attempt" -lt "$max" ]; do
   attempt=$((attempt+1))
-  RESP="$(curl -s -X POST "$URL" -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d "$BODY" -w $'\n%{http_code}' 2>/dev/null || true)"
+  RESP="$(printf '%s' "$BODY" | curl -s -X POST "$URL" -H "Content-Type: application/json" -H @<(printf 'Authorization: Bearer %s\n' "$TOKEN") --data-binary @- -w $'\n%{http_code}' 2>/dev/null || true)"
   CODE="$(printf '%s' "$RESP" | tail -n1)"
   JSON="$(printf '%s' "$RESP" | sed '$d')"
   # An id ALONE is not delivery. The router answers 200 WITH an id even when the

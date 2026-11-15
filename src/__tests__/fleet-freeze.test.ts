@@ -1,6 +1,6 @@
 // KILLSWITCH1022: the fleet freeze ("piros gomb"). Switching it on is open to any
 // dashboard credential (an agent may pull the brake); lifting it takes the owner,
-// through the SAME predicate as issuing credentials (mayIssueCredentials, #2163).
+// through the owner gate (mayActAsOwner, #2163; OWNERGATE4-1104: also before the first login).
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
 import type http from 'node:http'
 import { Readable } from 'node:stream'
@@ -139,10 +139,14 @@ describe('lifting it: the owner only, the #2163 predicate', () => {
     expect(isFleetFrozen()).toBe(false)
   })
 
-  it('before the first login exists the token is the one owner credential there is', async () => {
+  // OWNERGATE4-1104: unfreeze is no first-run path; an agent could otherwise lift the brake on an install without a login.
+  it('before the first login exists the token cannot lift it either: 403 setup_required, still frozen', async () => {
     await freeze(TOKEN)
-    expect((await unfreeze(TOKEN)).status).toBe(200)
-    expect(isFleetFrozen()).toBe(false)
+    const r = await unfreeze(TOKEN)
+    expect(r.status).toBe(403)
+    expect(r.json.code).toBe('owner_session_required')
+    expect(r.json.setup_required).toBe(true)
+    expect(isFleetFrozen()).toBe(true)
   })
 })
 
@@ -221,6 +225,42 @@ describe('the loops', () => {
     expect(src.match(/return setInterval\(/g)?.length ?? 0).toBeLessThanOrEqual(2)
   })
 
+  // The first tick. A loop that starts with a one-shot setTimeout before its
+  // interval ran that first tick ungated: after a dashboard restart under a 'stop' freeze, the
+  // channel monitor's first check revived the stopped agents (desired-state reconcile) and the
+  // schedule runner injected prompts 5 s after boot. Every start function that arms a one-shot
+  // first tick right before its gated interval gates that tick too, under the same label.
+  const FIRST_TICK_FILES = [
+    'web/channel-monitor.ts', 'web/schedule-runner.ts', 'web/auto-restart-runner.ts', 'web/model-fallback-runner.ts',
+    'web/reauth-healer.ts', 'web/context-guard-runner.ts', 'web/channel-health-monitor.ts', 'web/stuck-input-watcher.ts',
+    'web/stuck-tool-call-watcher.ts', 'web/inbox-nudge-watcher.ts', 'web/federation/poller.ts', 'web/federation/capability-runner.ts',
+  ]
+  it.each(FIRST_TICK_FILES)('%s gates its one-shot first tick like its interval', (file) => {
+    const lines = readFileSync(join(SRC, file), 'utf-8').split('\n')
+    let pairs = 0
+    lines.forEach((line, i) => {
+      const m = line.match(/^\s*return setInterval\(whileNotFrozen\('([^']+)'/)
+      if (!m) return
+      let j = i - 1
+      while (j >= 0 && /^\s*\/\//.test(lines[j])) j--
+      if (j < 0 || !/^\s*setTimeout\(/.test(lines[j])) return
+      pairs++
+      expect(lines[j], `${file}:${j + 1}`).toMatch(new RegExp(`^\\s*setTimeout\\(whileNotFrozen\\('${m[1]}', `))
+    })
+    expect(pairs, `${file}: no first-tick setTimeout found next to the gated interval`).toBeGreaterThan(0)
+  })
+
+  it('a gated first tick armed while frozen never runs, even though the freeze outlived a restart', async () => {
+    vi.useFakeTimers()
+    try {
+      await freeze(TOKEN)
+      const body = vi.fn()
+      setTimeout(whileNotFrozen('fake-first-tick', body), 30_000)
+      vi.advanceTimersByTime(31_000)
+      expect(body).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
   // Behaviour, not text, for the timer wiring of the three loops that matter most:
   // a fake clock drives the real start function; frozen, the wrapped body never runs.
   it('a wrapper handed to setInterval runs nothing while frozen, and runs again after', async () => {
@@ -267,9 +307,11 @@ describe("the dashboard's own Claude calls and the worker session", () => {
     expect(WORKER_FREEZE_GATE_CMD).toContain(join('scripts', 'hooks', 'fleet-freeze-gate.sh'))
   })
 
-  it('ensureWorkerCwd writes the worker settings through withFleetFreezeGate', () => {
+  it('ensureWorkerCwd writes the worker settings through withWorkerGates, which applies withFleetFreezeGate first', () => {
     const src = readFileSync(join(__dirname, '..', 'web', 'agent-worker.ts'), 'utf-8')
-    expect(src).toMatch(/writeFileSync\(settingsPath, JSON\.stringify\(withFleetFreezeGate\(\{/)
+    expect(src).toMatch(/writeFileSync\(settingsPath, JSON\.stringify\(withWorkerGates\(withWorkerMailDeny\(\{/)
+    // ENVRELAXGATE1104: the worker gates build on the freeze gate, never instead of it
+    expect(src).toMatch(/export function withWorkerGates\(settings: WorkerSettings\): WorkerSettings \{\n  const out = withFleetFreezeGate\(settings\)/)
   })
 })
 

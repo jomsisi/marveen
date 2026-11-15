@@ -107,12 +107,17 @@ describe('PORTCHAIN1: the port chain follows WEB_PORT on a NON-default port', ()
       ownerName: 'Owner', webPort: Number(PORT),
     })
     expect(rendered).not.toContain('3420')
+    // #2338: the PreCompact saves go through scripts/marveen-api.sh, which takes the port
+    // from MARVEEN_WEB_PORT / WEB_PORT / the install's .env itself, so no port is baked in.
+    expect(rendered).not.toMatch(/localhost:\d+\/api\//)
+    expect(rendered).toContain('/opt/install/scripts/marveen-api.sh memory-save ')
+    expect(rendered).toContain('/opt/install/scripts/marveen-api.sh daily-log ')
+    expect(rendered).toContain('/opt/install/scripts/marveen-api.sh taskstate-save ')
     expect(() => JSON.parse(rendered)).not.toThrow()
     // The write examples no longer carry a URL at all: they go through
     // scripts/dash-api.sh. Asserting the helper's NAME here would say nothing
     // about the port, so the chain is measured where it now runs -- see the
     // block below, which executes the helpers against a real listener.
-    expect(rendered).toContain('bash scripts/dash-api.sh')
   })
 
   it('channel-monitor builds its agent instruction from WEB_PORT', () => {

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { readEnvFile } from './env.js'
 import { parseLabelPalette } from './css-color.js'
 import { resolveFleetVenvDir } from './fleet-venv.js'
-import { DISTRIBUTION_DEFAULT_AGENT_MODEL } from './config-registry.js'
+import { DISTRIBUTION_DEFAULT_AGENT_MODEL, getSettingDefinition, isOverridesOnly } from './config-registry.js'
 import { FIXED_RESERVED_AGENT_IDS } from './web/sanitize.js'
 import { getProviderType, getChannelToken, getChannelChatId, type ChannelProviderType } from './channel-provider.js'
 
@@ -39,7 +39,12 @@ function readConfigOverrides(): Record<string, unknown> {
 const overrides = readConfigOverrides()
 // Effective raw value for a registry-backed key consumed at boot:
 // config-overrides.json wins, then .env. Callers apply their own default.
-function cfg(key: string): string | undefined {
+export function cfg(key: string): string | undefined {
+  // ENVRELAXGATE1104 step 2: cfg() has its own override > .env order, so an overrides-only (security) key read here
+  // would let a loosening .env line count. Such a key goes through the settings store; refusing here keeps a future
+  // boot-time reader from bypassing the rule.
+  const def = getSettingDefinition(key)
+  if (def && isOverridesOnly(def)) throw new Error(`cfg(): ${key} is overrides-only; read it through the settings store`)
   const ov = overrides[key]
   if (ov !== undefined && ov !== null && String(ov).length > 0) return String(ov)
   return env[key]
@@ -166,8 +171,9 @@ export const OWNER_NAME_PLACEHOLDER = 'Owner'
 export const OWNER_NAME = env['OWNER_NAME'] ?? OWNER_NAME_PLACEHOLDER
 // Shared Google Drive folder ID the fleet writes deliverables into. Empty by
 // default (distribution-safe: no owner-specific folder is baked into a fresh
-// install's generated agent CLAUDE.md); set OWNER_DRIVE_FOLDER in .env to wire
-// the default shared drive for this install.
+// install's generated agent CLAUDE.md). The generator reads the setting through
+// the settings store (agent-scaffold.ts), where it is overrides-only: set it on
+// the Settings page, a .env line no longer counts (ENVRELAXGATE1104).
 export const OWNER_DRIVE_FOLDER = env['OWNER_DRIVE_FOLDER'] ?? ''
 export const BOT_NAME = env['BOT_NAME'] ?? 'Marveen'
 
@@ -598,6 +604,22 @@ export const HEARTBEAT_AGENT_ENABLED =
 // shipped default; parsed (and a malformed value rejected whole) in
 // web/permission-prompt-alert.ts. PERMFLOOD1012.
 export const PERMISSION_ALERT_MARKS = (cfg('PERMISSION_ALERT_MARKS') ?? '').trim()
+
+// Routine (self-healing) recovery alerts on the owner's channel (DEFAULT ON).
+// web/routine-alert.ts reports the fleet's own recoveries -- "the main session
+// got stuck, I restarted it", "the session disappeared, respawning". They exist
+// because a SILENT wedge cost a morning (2026-07-30), but they are also the
+// fleet's normal operating noise, and an install may want them off the channel
+// without losing the record. The default must stay ON: an install that never
+// touches this key keeps the exact behaviour it had before the switch existed.
+// Only an explicit off value silences them, and even then the occurrence is
+// still logged (dashboard.log) -- this gate turns a message into a log line, it
+// never drops the fact. The REAL failure alerts are a different function
+// (sendAlert in web/channel-monitor.ts, e.g. "the automatic restart did NOT
+// succeed") and always go out, whatever this is set to.
+// Boot-time const (like SUBAGENT_INBOX_TEE): takes effect on dashboard restart.
+export const NOTIFY_ROUTINE_ALERTS =
+  !['0', 'false', 'no', 'off'].includes((cfg('NOTIFY_ROUTINE_ALERTS') ?? '1').trim().toLowerCase())
 
 // Sub-agent Telegram inbox delivery-path tee (opt-in, DEFAULT OFF).
 // When enabled, a telegram sub-agent loads the channel plugin via a per-agent

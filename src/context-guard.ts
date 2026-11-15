@@ -75,6 +75,14 @@ export interface ContextGuardConfig {
    *  false, so the auto-restart runner keeps its own nightly restart instead
    *  of standing aside for a tier that can never fire. */
   dailyHandoffTime: string | null
+  /** How long (minutes) one restart need of the agent may be held while it
+   *  owns a live heavy-job gate job (scripts/heavy-job-gate.sh), running or
+   *  queued: at most this long per hold episode, an unbroken run of
+   *  restarting sweeps (src/web/heavy-job-hold.ts), however many jobs come
+   *  and go. A restart kills the agent's process tree, the gated job with it
+   *  (measured: a 36-minute gated test run ended in 143 with no result). Past
+   *  it the restart goes ahead. 0 = never hold. */
+  heavyJobDeferMaxMinutes: number
 }
 
 export const DEFAULT_CONTEXT_GUARD: ContextGuardConfig = {
@@ -130,6 +138,10 @@ export const DEFAULT_CONTEXT_GUARD: ContextGuardConfig = {
   // the tier without naming a time keeps the old nightly restart rather than
   // losing it to a tier that never fires.
   dailyHandoffTime: null,
+  // 45 minutes: longer than the measured gated run that a restart killed
+  // (2182 s = 36 min), shorter than a saturated agent should stay
+  // unreachable. A job that outlives it is killed, loudly.
+  heavyJobDeferMaxMinutes: 45,
 }
 
 /**
@@ -178,6 +190,13 @@ export function normalizeContextGuardConfig(raw: unknown): ContextGuardConfig {
     // not parse as HH:MM becomes null rather than being carried through, so a
     // typo disarms the tier instead of scheduling it at an unreadable time.
     dailyHandoffTime: parseHHMM(o.dailyHandoffTime) !== null ? (o.dailyHandoffTime as string).trim() : null,
+    // 0 is a real value here (never defer), so not mins(): only a finite,
+    // non-negative number is taken, capped at a day so a typo cannot park a
+    // saturated agent indefinitely.
+    heavyJobDeferMaxMinutes:
+      (typeof o.heavyJobDeferMaxMinutes === 'number' && Number.isFinite(o.heavyJobDeferMaxMinutes) && o.heavyJobDeferMaxMinutes >= 0)
+        ? Math.min(o.heavyJobDeferMaxMinutes, 24 * 60)
+        : DEFAULT_CONTEXT_GUARD.heavyJobDeferMaxMinutes,
   }
 }
 
@@ -1456,4 +1475,71 @@ export function ertekeldRestartEredmenyt(be: {
   // -- ez pontosan az, amit a restarttol vartunk.
   if (be.elozoTranszkript === null) return 'uj-session'
   return be.mostaniTranszkript === be.elozoTranszkript ? 'hatastalan' : 'uj-session'
+}
+
+/** OWNERGATE3-1104 (review, Samu 69602): which fields of a context-guard change make the guard WEAKER, comparing the
+ *  normalized config before and after the change. The shared access token (every sub-agent can read it) may only
+ *  strengthen a guard (the main agent arms other agents' guards with it); any weakening needs the owner, on any
+ *  agent, so a sub-agent cannot switch off or loosen another agent's guard. Weaker means:
+ *   - a switch going from on to off: enabled, saturationRestart, idleFlushEnabled, dailyHandoffEnabled;
+ *   - a number going up (the guard acts later, waits longer or holds longer): actPct, hardPct, cooldownMinutes,
+ *     handoffTimeoutMinutes, idleFlushTokens, idleMinutes, heavyJobDeferMaxMinutes;
+ *   - limitTokens changing in any way except to a smaller explicit number (null means "infer from the model", which
+ *     may be a larger window, so clearing it is treated as weakening);
+ *   - dailyHandoffTime moved or cleared once set (a moved time can postpone the restart; setting it from null arms).
+ *  A reset to the shipped defaults is not special: the default enabled is false, so a reset can switch a guard off. */
+export function contextGuardWeakenings(before: ContextGuardConfig, after: ContextGuardConfig): string[] {
+  const out: string[] = []
+  for (const k of ['enabled', 'saturationRestart', 'idleFlushEnabled', 'dailyHandoffEnabled'] as const) {
+    if (before[k] === true && after[k] !== true) out.push(k)
+  }
+  for (const k of ['actPct', 'hardPct', 'cooldownMinutes', 'handoffTimeoutMinutes', 'idleFlushTokens', 'idleMinutes', 'heavyJobDeferMaxMinutes'] as const) {
+    if (after[k] > before[k]) out.push(k)
+  }
+  if (after.limitTokens !== before.limitTokens) {
+    const smaller = before.limitTokens !== null && after.limitTokens !== null && after.limitTokens < before.limitTokens
+    if (!smaller) out.push('limitTokens')
+  }
+  if (before.dailyHandoffTime !== null && after.dailyHandoffTime !== before.dailyHandoffTime) out.push('dailyHandoffTime')
+  return out
+}
+
+/** OWNERGATE3-1104 (review, Dani 69657): every context-guard key, classified, so a new key cannot fall outside the
+ *  token gate silently (a test pins that this covers exactly the keys of DEFAULT_CONTEXT_GUARD). */
+export const CONTEXT_GUARD_FIELD_KIND: Record<keyof ContextGuardConfig, 'switch' | 'value'> = {
+  enabled: 'switch',
+  saturationRestart: 'switch',
+  idleFlushEnabled: 'switch',
+  dailyHandoffEnabled: 'switch',
+  actPct: 'value',
+  hardPct: 'value',
+  limitTokens: 'value',
+  cooldownMinutes: 'value',
+  handoffTimeoutMinutes: 'value',
+  idleFlushTokens: 'value',
+  idleMinutes: 'value',
+  dailyHandoffTime: 'value',
+  heavyJobDeferMaxMinutes: 'value',
+}
+
+/** OWNERGATE3-1104 (review, Dani 69657): the fields of a context-guard change the shared access token may NOT make.
+ *  Strengthening without a bound is not harmless: a guard driven to actPct 0.01 or a cooldown of 0.01 minutes hands
+ *  the agent off and restarts it continuously, an availability attack a sub-agent could aim at any agent, the main
+ *  one included. So with the token:
+ *   - a switch may only be turned ON;
+ *   - any other field may only change to its SHIPPED DEFAULT, and only when that is not a weakening
+ *     (contextGuardWeakenings), e.g. a lowered threshold back to the default is a weakening and stays the owner's.
+ *  Everything else needs the owner. The arming skill (enabled:true with the shipped defaults) stays on the token. */
+export function contextGuardTokenRefusals(before: ContextGuardConfig, after: ContextGuardConfig): string[] {
+  const weak = new Set(contextGuardWeakenings(before, after))
+  const out: string[] = []
+  for (const k of Object.keys(CONTEXT_GUARD_FIELD_KIND) as (keyof ContextGuardConfig)[]) {
+    if (after[k] === before[k]) continue
+    if (CONTEXT_GUARD_FIELD_KIND[k] === 'switch') {
+      if (after[k] !== true) out.push(k)
+      continue
+    }
+    if (weak.has(k) || after[k] !== DEFAULT_CONTEXT_GUARD[k]) out.push(k)
+  }
+  return out
 }

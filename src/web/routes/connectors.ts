@@ -14,8 +14,9 @@ import { atomicWriteFileSync } from '../atomic-write.js'
 import { readFileOr, AGENTS_BASE_DIR, listAgentNames , readJsonObjectForWrite } from '../agent-config.js'
 import { getMcpListCache, refreshMcpListCache, purgeFromMcpListCache } from '../mcp-list.js'
 import { readBody, json } from '../http-helpers.js'
+import { mayActAsOwner, refuseOwner } from './auth.js'
 import { getExternalProjectPaths, addExternalProjectPath, removeExternalProjectPath, getGitHubRepos, installGitHubRepo, removeGitHubRepo, updateGitHubRepo, detectRequiredEnvVars, parseRunScriptsFlag } from '../dashboard-settings.js'
-import { listSecrets, setSecret, getSecret, deleteSecret } from '../vault.js'
+import { listSecrets, setSecret, getSecret, deleteSecret, updateSecretLabel, normalizeVaultLabel, VAULT_LABEL_MAX_LENGTH } from '../vault.js'
 import { logVaultRead, isSshPrivateKeyId, principalOf, readVaultAcl, vaultReadRefused, vaultAclMode } from '../vault-acl.js'
 import {
   getBindings, addBinding, removeBinding, removeBindingsForSecret,
@@ -299,6 +300,11 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/connectors/external-paths' && method === 'POST') {
+    // OWNERGATE2-1104: adds a project directory whose .mcp.json servers the dashboard then lists and offers to assign to agents; owner-only.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Adding an external project path needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     const { path: p } = JSON.parse(body.toString()) as { path: string }
     const result = addExternalProjectPath(p)
@@ -308,6 +314,11 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/connectors/external-paths' && method === 'DELETE') {
+    // OWNERGATE2-1104: removes an external project path (symmetric with the POST); owner-only.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Removing an external project path needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     const { path: p } = JSON.parse(body.toString()) as { path: string }
     const paths = removeExternalProjectPath(p)
@@ -321,6 +332,11 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/connectors/github-repos' && method === 'POST') {
+    // OWNERGATE2-1104: clones a GitHub repo onto the host and runs npm install in it (with runScripts, its lifecycle scripts: code execution), and vaults the env values sent with it; owner-only.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Installing a GitHub repo needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     const { url, env, runScripts } = JSON.parse(body.toString()) as { url: string, env?: Record<string, string>, runScripts?: unknown }
     if (!url?.trim()) { json(res, { error: 'URL is required' }, 400); return true }
@@ -349,6 +365,11 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   const githubRepoMatch = path.match(/^\/api\/connectors\/github-repos\/([^/]+)$/)
   if (githubRepoMatch && method === 'DELETE') {
+    // OWNERGATE2-1104: deletes an installed GitHub repo's directory and entry; owner-only.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Removing a GitHub repo needs the dashboard login (an owner session).')
+      return true
+    }
     const name = decodeURIComponent(githubRepoMatch[1])
     const result = removeGitHubRepo(name)
     if (result.error) { json(res, { error: result.error }, 404); return true }
@@ -357,6 +378,11 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
   }
 
   if (githubRepoMatch && method === 'PATCH') {
+    // OWNERGATE2-1104: git pull plus npm install in the repo, and flips runScripts (lifecycle scripts: code execution); owner-only, like the POST.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Updating a GitHub repo needs the dashboard login (an owner session).')
+      return true
+    }
     const name = decodeURIComponent(githubRepoMatch[1])
     // The body is optional (older clients send none); only `runScripts` is read.
     const raw = (await readBody(req)).toString().trim()
@@ -437,6 +463,12 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/connectors' && method === 'POST') {
+    // OWNERGATE2-1104: runs `claude mcp add` (user or project scope) with a caller-given stdio command, i.e. a
+    // command every agent on that scope will launch; owner-only, before the body is read and before any spawn.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Adding a connector needs the dashboard login (an owner session).')
+      return true
+    }
     const body = await readBody(req)
     const data = JSON.parse(body.toString()) as {
       name: string
@@ -569,6 +601,12 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   const connectorAssignMatch = path.match(/^\/api\/connectors\/(.+)\/assign$/)
   if (connectorAssignMatch && method === 'POST') {
+    // OWNERGATE2-1104: writes agents/<name>/.mcp.json (which MCP servers, and so which commands, an agent runs),
+    // the same file PUT /api/agents/:name gates as mcpJson; without this the assign was a way around that gate.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Assigning a connector to agents needs the dashboard login (an owner session).')
+      return true
+    }
     const connectorName = decodeURIComponent(connectorAssignMatch[1])
     const body = await readBody(req)
     const { agents: rawTargetAgents, allAgents: rawVisibleAgents } = JSON.parse(body.toString()) as { agents: string[], allAgents?: string[] }
@@ -691,6 +729,11 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   const catalogInstallMatch = path.match(/^\/api\/mcp-catalog\/([^/]+)\/install$/)
   if (catalogInstallMatch && method === 'POST') {
+    // OWNERGATE2-1104: runs `claude mcp add --scope user`, i.e. adds an MCP server (a command the host runs) for every agent on the machine, and vaults the keys sent with it; owner-only.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Installing an MCP server from the catalog needs the dashboard login (an owner session).')
+      return true
+    }
     const id = decodeURIComponent(catalogInstallMatch[1])
     try {
       const catalog = loadMcpCatalog()
@@ -746,6 +789,12 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   const catalogUninstallMatch = path.match(/^\/api\/mcp-catalog\/([^/]+)\/uninstall$/)
   if (catalogUninstallMatch && method === 'DELETE') {
+    // OWNERGATE3-1104 (review): runs `claude mcp remove` on the user and project scope, i.e. takes an MCP server away
+    // from every agent on the machine; the install twin is owner-only, so is this. Before the catalog read and any spawn.
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Removing an MCP server installed from the catalog needs the dashboard login (an owner session).')
+      return true
+    }
     const id = decodeURIComponent(catalogUninstallMatch[1])
     try {
       const catalog = loadMcpCatalog()
@@ -783,7 +832,15 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const { id, label, value } = JSON.parse(body.toString()) as { id: string, label: string, value: string }
     if (!id?.trim() || !value) { json(res, { error: 'id and value required' }, 400); return true }
-    setSecret({ id: id.trim(), label: label || id.trim(), value })
+    if (label !== undefined && label !== null && typeof label !== 'string') { json(res, { error: 'label must be a string' }, 400); return true }
+    // An unchanged stored label passes whatever its length (value rotation re-sends it); a new
+    // secret or a changed label is capped. listSecrets() never decrypts anything.
+    if (typeof label === 'string' && label.trim().length > VAULT_LABEL_MAX_LENGTH
+        && label.trim() !== listSecrets().find(s => s.id === id.trim())?.label) {
+      json(res, { error: `label must be at most ${VAULT_LABEL_MAX_LENGTH} characters` }, 400)
+      return true
+    }
+    setSecret({ id: id.trim(), label: normalizeVaultLabel(id.trim(), label ?? ''), value })
     const syncResult = syncSecret(id.trim())
     json(res, { ok: true, synced: syncResult.updated })
     return true
@@ -861,6 +918,30 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     logVaultRead(id, ctx.auth, val !== null, acl)
     if (val === null) { json(res, { error: 'Not found' }, 404); return true }
     json(res, { id, value: val })
+    return true
+  }
+
+  // Label-only update: never decrypts or re-sends the value, and there is nothing to sync
+  // (syncSecret propagates the VALUE into bound MCP configs; the label is not part of them).
+  if (vaultMatch && !isVaultSubroute && method === 'PATCH') {
+    const id = decodeURIComponent(vaultMatch[1])
+    // ssh-key-* entries are managed exclusively by the SSH key pool.
+    if (isSshPrivateKeyId(id)) {
+      json(res, { error: 'SSH private keys are managed by the SSH key pool' }, 403)
+      return true
+    }
+    let body: { label?: unknown } | null
+    try { body = JSON.parse((await readBody(req)).toString()) } catch { json(res, { error: 'Invalid JSON body' }, 400); return true }
+    if (!body || typeof body !== 'object' || typeof body.label !== 'string') {
+      json(res, { error: 'label must be a string' }, 400)
+      return true
+    }
+    if (body.label.trim().length > VAULT_LABEL_MAX_LENGTH) {
+      json(res, { error: `label must be at most ${VAULT_LABEL_MAX_LENGTH} characters` }, 400)
+      return true
+    }
+    if (!updateSecretLabel(id, normalizeVaultLabel(id, body.label))) { json(res, { error: 'Not found' }, 404); return true }
+    json(res, { ok: true })
     return true
   }
 
