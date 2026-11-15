@@ -64,6 +64,8 @@ const EXEMPT: Record<string, string> = {
     'shared library imported by hooks to record a swallowed failure in store/hook-errors.log (SILENTOLLAMA926); not itself a hook',
   'clearstate_lib.py':
     'shared library imported by clear-capture.py / clear-replay.py; not itself a hook',
+  'memory_frontmatter_lib.py':
+    'shared library: the one memory-frontmatter check, imported by memory-frontmatter-gate.py (Write/Edit) and memory-frontmatter-bash-gate.py (Bash, KAPUEGYUT918); not itself a hook',
   'email_extract.py':
     'shared library imported by outgoing-copy-gate.py (and the level-2 email approval gate, EMAILKAPU901 PR2); not itself a hook',
   'memory-save.sh':
@@ -132,6 +134,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'fork gate for the MAIN agent only (docstring): refuses a Bash call that contains BOTH agent-msg.sh and agent-msg-close.sh (the send and the receipt citing its id must be two commands); it guards the main agent\'s own batching habit, and sub-agents have no such closing-receipt workflow',
   'memoria-halott-cel-iraskor.py':
     'fork write-time check for the MAIN agent only (docstring): flags a dead [[link]] or a Cyrillic homoglyph written into a memory page of the file-backed store the main agent maintains; sub-agents do not own that store',
+  'persona-change-notify.py':
+    'fleet-wide BY CONSTRUCTION, so one wiring already covers every agent: it resolves the repo root from its own file location, and watched() enumerates agents/*/CLAUDE.md and SOUL.md alongside the main pair. Seeding it per-agent would point every seeded session at the SAME store/.persona-hashes.json, and because the hook stamps the new digest BEFORE it sends, whichever session reaches it first silences the others -- the race can only LOSE an alert, so seeding would weaken the guard rather than extend it',
   'telegram-reply-guard.py':
     'the Stop-hook half of the Telegram reply enforcement (#856) decides from ledger_lib.open_question_with_age, i.e. the conversation_log the main-only ledger trio writes; seeded alone it would read an empty ledger and allow every stop, a silent no-op -- seeding it means seeding the ledger trio with it, a separate design decision',
 }

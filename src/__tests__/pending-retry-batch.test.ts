@@ -136,6 +136,8 @@ vi.mock('../channel-provider.js', async (importOriginal) => {
 })
 vi.mock('../web/scheduled-tasks-io.js', () => ({
   listScheduledTasks: () => mockListScheduledTasks(),
+  // v1.43.0: the runner re-reads the CURRENT definition of a queued task.
+  readScheduledTask: (name: string) => mockListScheduledTasks().find((t: ScheduledTask) => t.name === name) ?? null,
   SCHEDULED_TASKS_DIR: '/tmp/marveen-retry-batch-no-tasks-dir',
 }))
 vi.mock('../web/agent-process.js', () => ({

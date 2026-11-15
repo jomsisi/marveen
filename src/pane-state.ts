@@ -99,28 +99,63 @@ const IDLE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\)| �
 // src/__tests__/pane-footer-tailless.test.ts).
 const IDLE_FOOTER_TAILLESS_RX = /((?:[A-Za-z][\w-]* ){1,3})on · \S/
 
+
+// tmux clips the footer to the pane width and marks the cut with `…`, so on a
+// narrow pane the required tail arrives as `← for agen…` and IDLE_FOOTER_RX
+// cannot match: the pane reads 'unknown' and every idle-waiting consumer stalls
+// (observed 2026-08-22: the context guard force-restarted an agent 20 minutes
+// after it had written its HANDOFF.md). Two `·` separators before the cut keep
+// it UI chrome; a clipped prose line rarely carries more than one.
+//
+// KEPT OUT OF IDLE_FOOTER_RX ON PURPOSE, and only ever tested against the LAST
+// non-empty line (see idleFooterIndex). An earlier version folded it into the
+// shared regex with the `m` flag, so it matched the end of ANY line: a clipped
+// footer or a prose line ending in `…` in the scrollback above an open
+// permission prompt made the pane read idle, and delivery could type a message
+// plus Enter into the dialog with "1. Yes" preselected (#1743 review).
+const FOOTER_TRUNCATED_RX = /(?:[A-Za-z][\w-]* ){1,3}on · [^\n]*·[^\n]*…\s*$/
+
+// VAGTECHIDLE1009 (customer report, Vág-Tech, 2026-10-09; also seen on our own
+// fleet 2026-10-08): while a background shell is still running, the footer can
+// END in its count -- `⏵⏵ bypass permissions on · 1 shell` -- with none of the
+// tails IDLE_FOOTER_RX requires (`ctrl+t`, `↓ to manage`, `← for agents`). The
+// pane then read 'unknown', paneLooksIdle never became true, and every
+// readiness-gated path stopped: delivery, the auto-restart idle guard (6.5 and
+// 18.5 hours of silence at the customer). Same rule as the clipped form: the
+// mode word, `on`, then only `· N shell(s)` and an optional `· N monitor(s)`
+// to the end of the line, and ONLY on the last non-empty line, so the same
+// words quoted in a log line in the scrollback never count.
+const FOOTER_SHELL_TAIL_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\))? · \d+ shells?(?: · \d+ monitors?)?\s*$/
+
 /**
  * Index of the live idle footer line, or -1. The single place that decides
- * what counts as a footer and WHICH line is the live one.
+ * what counts as a footer and WHICH line is the live one. Accepts the pane text
+ * or its already-split lines (the fork's callers pass the text, upstream's the
+ * lines; both resolve identically).
  *
  * Two shapes, deliberately asymmetric:
- *   - tail-less (`... on · 1 shell`): accepted ONLY as the last non-empty
+ *   - the weak shapes (tail-less `... on · 1 shell`, the tmux-clipped `…` form,
+ *     the bare background-shell count): accepted ONLY as the last non-empty
  *     line, because without the chrome tail the string is weak enough to
- *     appear in prose.
+ *     appear in prose or in a dialog's own hint.
  *   - strict (carries the tail): accepted anywhere, but resolved from the
- *     BOTTOM. detectPaneState and liveInputBox used Array.findIndex here,
- *     i.e. top-down, so a footer-looking line quoted in scrollback won the
- *     anchor and the input-box scan then ran above the live box: a pane
+ *     BOTTOM. A top-down search let a footer-looking line quoted in scrollback
+ *     win the anchor, so the input-box scan ran above the live box: a pane
  *     holding unsubmitted text read 'idle' instead of 'typing' and the
  *     scheduler delivered on top of it (measured 2026-10-23 on a real
- *     capture-pane dump, before the tail-less shape was added at all).
+ *     capture-pane dump).
  */
-export function idleFooterIndex(pane: string): number {
-  if (!pane) return -1
-  const lines = pane.split('\n')
+export function idleFooterIndex(input: string | string[]): number {
+  const lines = Array.isArray(input) ? input : (input ? input.split('\n') : [])
+  if (lines.length === 0) return -1
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!lines[i].trim()) continue
-    if (IDLE_FOOTER_TAILLESS_RX.test(lines[i])) return i
+    const l = lines[i]
+    // FORK NOTE (v1.43.0 merge): our own tail-less shape (IDLE_FOOTER_TAILLESS_RX, any text
+    // after `on · `) is NOT used as a footer here any more. Upstream's two narrower shapes
+    // (clipped `…` form, bare `· N shell(s)` count) cover the 2.1.309 incident and its tests
+    // refuse the wider lookalikes; the regex stays only as the shared mode-prefix reader.
+    if (FOOTER_TRUNCATED_RX.test(l) || FOOTER_SHELL_TAIL_RX.test(l)) return i
     break
   }
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -131,9 +166,9 @@ export function idleFooterIndex(pane: string): number {
 
 /** Whether the pane shows a live idle footer. Superset of the old
  *  whole-pane IDLE_FOOTER_RX test: nothing that matched before stops
- *  matching, the tail-less shape is added on the last non-empty line. */
-export function hasIdleFooter(pane: string): boolean {
-  return idleFooterIndex(pane) >= 0
+ *  matching. */
+export function hasIdleFooter(input: string | string[]): boolean {
+  return idleFooterIndex(input) >= 0
 }
 
 // Positive busy signals. ANY match anywhere in the pane means the turn
@@ -705,6 +740,83 @@ export function permissionPromptSummary(pane: string): PermissionPromptSummary |
   return { title, reason }
 }
 
+// Plan usage limit ("quota wall"), card 41a0c3a3. When the plan's usage limit
+// is hit, the CLI ends the turn and paints a banner BELOW the input box, with
+// the prompt itself idle. Two live captures of the same moment (two sessions on
+// one key, 2026-09-30 16:14Z; fixture quota-wall-usage-limit.txt):
+//
+//   ────────────────────────────────────────
+//   ❯
+//   ────────────────────────────────────────
+//     ⚠ Usage limit reached · limit resets 6:20pm
+//       Continuing automatically at 6:20pm · esc to cancel · /usage-credits to
+//       continue now
+//     Opus 5.5 | ctx 50% | 5h 100% | 7d 26%
+//
+// An earlier CLI (measured 2026-09-24) drew the same banner on one line:
+//   ⚠ Usage limit reached · continuing automatically at 7:40pm · esc to cancel
+//
+// Only a ⚠ line UNDER the box's bottom rule counts. The same words above the
+// box are conversation: the failed turn echoes "You've hit your session limit ·
+// resets 6:20pm" there, and an agent can quote a banner in a reply. The
+// "has reset" forms ("Usage limit reset · continuing automatically") and the
+// "approaching" warning are not a wall, and neither regex below matches them.
+const QUOTA_WALL_RX = /\busage limit reached\b|\bhit (?:your|the) (?:session|usage|weekly) limit\b|\b(?:session|weekly|\d+-hour) limit reached\b/i
+// "limit resets 6:20pm", "resets at 2am", "continuing automatically at 7:40pm":
+// the time is whatever the CLI printed, up to the next · separator or the line
+// end. A real one is short ("Sep 28, 5pm (UTC)" is 17 characters); anything
+// longer is not a time we can quote, so it reads as "the banner does not say".
+const QUOTA_WALL_RESET_RX = /\b(?:resets(?: at)?|continuing automatically at)\s+([^·\n]{1,40}?)\s*(?:·|$)/i
+const QUOTA_WALL_BANNER_MAX = 220
+
+export interface QuotaWall {
+  /** The banner as painted, its wrapped continuation lines rejoined into one line. */
+  banner: string
+  /** When the CLI says it resumes, verbatim ("6:20pm"); null when the banner does not say. */
+  resetsAt: string | null
+}
+
+/**
+ * The plan usage-limit banner under the live input box, or null.
+ *
+ * Pure + dependency-free. The reset time is kept as the CLI printed it: the
+ * clock it is in belongs to the session's host, so turning it into an instant
+ * here would be a guess.
+ */
+export function detectQuotaWall(pane: string): QuotaWall | null {
+  if (!pane || !pane.trim()) return null
+  const lines = pane.split('\n')
+  let bottomRule = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { bottomRule = i; break }
+  }
+  if (bottomRule < 0) return null
+  for (let i = bottomRule + 1; i < lines.length; i++) {
+    const text = lines[i].trimStart()
+    if (!text.startsWith('⚠') || !QUOTA_WALL_RX.test(text)) continue
+    // The banner wraps at the pane width; its continuation lines are indented
+    // deeper than the ⚠ line, the status line under it is not.
+    const indent = lines[i].length - text.length
+    const parts = [text.trimEnd()]
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j].trimStart()
+      if (!next || lines[j].length - next.length <= indent) break
+      parts.push(next.trimEnd())
+    }
+    // Per part, not on the rejoined line: a wrapped part ends where the next
+    // sentence starts, and only the part's own end bounds the time.
+    let resetsAt: string | null = null
+    for (const p of parts) {
+      const m = QUOTA_WALL_RESET_RX.exec(p)
+      if (m) { resetsAt = m[1].trim(); break }
+    }
+    let banner = parts.join(' ').replace(/\s+/g, ' ').trim()
+    if (banner.length > QUOTA_WALL_BANNER_MAX) banner = banner.slice(0, QUOTA_WALL_BANNER_MAX - 1).trimEnd() + '…'
+    return { banner, resetsAt }
+  }
+  return null
+}
+
 // Claude Code FIRST-RUN gates: the interactive dialogs a brand-new install
 // parks on before the prompt ever renders -- the per-project "Do you trust the
 // files in this folder?" consent, the --dangerously-skip-permissions "Bypass
@@ -961,7 +1073,7 @@ export function detectsPermissionDialog(pane: string): boolean {
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(lines)) return false
   return PERMISSION_AMEND_RX.test(footerRegion)
     || (PERMISSION_QUESTION_RX.test(pane) && PERMISSION_YES_RX.test(pane))
 }
@@ -1880,7 +1992,7 @@ export function overfullParkedInputTail(pane: string): string | null {
     if (rx.test(busyRegion)) return null
   }
   if (BUSY_ESC_TO_INTERRUPT_RX.test(liveTailRegion(lines, LIVE_FOOTER_REGION_LINES))) return null
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(lines)
   if (footerIdx < 0) return null
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {

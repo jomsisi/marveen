@@ -195,7 +195,8 @@ describe('PORTCHAIN1: the port chain follows WEB_PORT on a NON-default port', ()
     for (const script of ['scripts/dash-api.sh', 'scripts/agent-msg.sh', 'scripts/agent-msg-close.sh']) {
       const src = readFileSync(join(ROOT, script), 'utf-8')
       // The default may stay as a last resort, but a .env read must precede it.
-      expect(src, `${script}: no .env WEB_PORT read`).toContain("grep -E '^WEB_PORT=' \"$BASE/.env\"")
+      // agent-msg.sh reads it with sed since v1.43.0 (#1869); the other helpers still grep.
+      expect(src, `${script}: no .env WEB_PORT read`).toMatch(/grep -E '\^WEB_PORT=' "\$BASE\/\.env"|s\/\^WEB_PORT=\/\/p/)
     }
   })
 

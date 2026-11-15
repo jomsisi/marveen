@@ -143,7 +143,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       throw err
     }
     const data = JSON.parse(body.toString()) as {
-      name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number
+      name: string; description: string; prompt: string; schedule: string; agent?: string; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; once?: boolean
     }
     const name = sanitizeScheduleName(data.name || '')
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
@@ -163,6 +163,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     }
     if (!data.schedule?.trim()) { json(res, { error: 'Schedule is required' }, 400); return true }
     if (!isValidCronShape(data.schedule)) { json(res, { error: 'Invalid cron expression' }, 400); return true }
+    if (data.once !== undefined && typeof data.once !== 'boolean') { json(res, { error: 'once must be true or false' }, 400); return true }
 
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (existsSync(dir)) { json(res, { error: 'Schedule already exists' }, 409); return true }
@@ -180,8 +181,9 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       command: data.command,
       timeoutMs: data.timeoutMs,
       failThreshold: data.failThreshold,
+      once: data.once,
     })
-    logger.info({ name, schedule: data.schedule }, 'Scheduled task created')
+    logger.info({ name, schedule: data.schedule, once: data.once === true }, 'Scheduled task created')
     json(res, { ok: true, name })
     return true
   }
@@ -204,7 +206,11 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       throw err
     }
     const data = JSON.parse(body.toString()) as {
-      description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number
+      description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; once?: boolean
+    }
+    if (data.once !== undefined && typeof data.once !== 'boolean') {
+      json(res, { error: 'once must be true or false' }, 400)
+      return true
     }
     if (data.prompt !== undefined && data.prompt.length > MAX_SCHEDULED_TASK_PROMPT_LEN) {
       json(res, {
