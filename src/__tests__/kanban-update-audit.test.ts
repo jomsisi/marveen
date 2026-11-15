@@ -127,7 +127,7 @@ describe('kanban update audit trail', () => {
 
     const { ctx, out } = putCtx('card-r1', { status: 'done', actor: 'sanyiba' })
     expect(await tryHandleKanban(ctx)).toBe(true)
-    expect(out.body).toEqual({ ok: true })
+    expect(out.body).toMatchObject({ ok: true }) // v1.45.0 adds version (+ evidence_warning) to the reply
 
     const events = getKanbanCardEvents('card-r1')
     expect(events).toHaveLength(1)

@@ -86,7 +86,8 @@ describe('the guard raises the alert (pinned at the source)', () => {
   // 4200, not 3000: the fleet's main-agent sink branch (operator notify for
   // MAIN_AGENT_ID) sits between the failure log and the queue send, and the
   // window must still reach the send-verify + catch below it.
-  const region = RUNNER.slice(i, i + 4200)
+  // 4400: the fork's one-line restart-effect registration sits in this stretch (fuggoRestartEllenorzesek.set).
+  const region = RUNNER.slice(i, i + 4400)
 
   it('clears the streak only on a rescue that actually ran', () => {
     const success = RUNNER.slice(i, RUNNER.indexOf('} catch (err) {', i))

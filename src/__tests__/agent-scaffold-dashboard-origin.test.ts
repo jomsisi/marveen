@@ -154,7 +154,8 @@ describe('generateClaudeMd prompt: no hardcoded localhost:3420', () => {
   // absolute and IS rooted in PROJECT_ROOT, in both generated zones.
   it.each([
     ['daily-log', '/api/daily-log'],
-    ['schedules', '/api/schedules'],
+    // schedules: agents may no longer create schedules at all (v1.45.0 self-pace gate), so the
+    // prompt carries no write recipe for them any more.
   ])('routes the %s write through dash-api.sh, not a rebuilt curl', (_label, path) => {
     expect(fnBody).toMatch(new RegExp(String.raw`bash \S*dash-api\.sh POST ${path}`))
     expect(fnBody).not.toContain(`-X POST http://localhost:3420${path}`)

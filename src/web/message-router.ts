@@ -11,16 +11,21 @@ import {
   markPendingFederatedFailed,
   setMessageResult,
   createAgentMessage,
+  lastMessageFromAgentAt,
   countNewerMessagesFromSameSender,
   stampMessageTrace,
   upsertOtelSpan,
   type AgentMessage,
 } from '../db.js'
+import { compareDeliveryOrder, deliveryRank } from '../delivery-order.js'
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
 import { scheduleDeliveryTurnCheck } from './delivery-turn-check.js'
-import { isKnownAgent, readAgentRemoteHost, readAgentVoiceConfig, readAgentWorksourceChannel, type AgentVoiceConfig } from './agent-config.js'
+import { isKnownAgent, agentDir, readAgentRemoteHost, readAgentVoiceConfig, readAgentWorksourceChannel, readAgentPullDelivery, type AgentVoiceConfig } from './agent-config.js'
+import { projectsDirFor } from './active-model.js'
+import { resolveAgentConfigDirForRead } from './claude-plans.js'
+import { readTranscriptProgressAt } from './transcript-progress.js'
 import { enqueueWorksourceItem, worksourceItemId } from './worksource-queue.js'
 import {
   agentSessionName,
@@ -31,18 +36,16 @@ import {
   capturePane,
   clearFeedbackModalAndRecheck,
 } from './agent-process.js'
-import { detectPaneState, detectQuotaWall, detectsBlockingMenu, detectsFirstRunGate, detectsPermissionDialog, permissionPromptSummary, type FirstRunGateKind, type PaneState, type PermissionPromptSummary, type QuotaWall } from '../pane-state.js'
+import { detectPaneState, detectQuotaWall, detectsBlockingMenu, detectsFirstRunGate, detectsHeldPeerMessage, detectsPermissionDialog, permissionPromptSummary, type FirstRunGateKind, type PaneState, type PermissionPromptSummary, type QuotaWall } from '../pane-state.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, isChannelInboundSender, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { composeBatchInjection, batchInjectCapFor } from './batch-inject.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
 import { isStopMessage, isUrgentDelivery, selectTickWindow } from './message-router-window.js'
+import { deliveryHoldFor, type DeliveryHold } from './delivery-hold.js'
 
-// A message that cannot be delivered within this window (target session never
-// exists / stays busy) is marked failed so it stops clogging the pending
-// queue and we stop re-scanning it forever. Matches the scheduled-task retry
-// window so a long turn that ate one also eats the other.
-const MESSAGE_ABANDON_WINDOW_MS = 60 * 60 * 1000
+import { MESSAGE_ABANDON_WINDOW_MS } from './message-abandon.js'
+import { whileNotFrozen } from './fleet-freeze.js'
 // How long a message must have waited before the stale-parked-input janitor is
 // allowed to clear the receiver's input box. Long enough that a brief, genuine
 // "agent parked a draft it is about to submit" never gets clobbered; short
@@ -51,6 +54,9 @@ const JANITOR_PARKED_MIN_AGE_MS = 45 * 1000
 // Log "skipping, target not ready" at most once per message id so a busy
 // receiver over many 5s ticks does not spam the log.
 const routerLoggedMisses: Set<number> = new Set()
+// Message ids whose pull-delivery staleness warning already went out, so a row
+// that legitimately waits for days warns ONCE instead of every 5s tick.
+const pullStaleNotified: Set<number> = new Set()
 // Per-message consecutive tmux-inject-failure counter. A send that THROWS
 // (send-keys hit the pane at a bad instant -- e.g. the receiver was mid-turn /
 // momentarily un-ready despite passing the readiness check) used to instant-
@@ -100,6 +106,7 @@ export function formatStuckSessionAlert(
   awaitingPermission = false,
   permissionAsk: PermissionPromptSummary | null = null,
   quotaWall: QuotaWall | null = null,
+  lastProgressAgoMs: number | null = null,
 ): string | null {
   if (agent === mainAgentId) return null
   const min = Math.round(stuckMs / 60000)
@@ -122,6 +129,14 @@ export function formatStuckSessionAlert(
   // alerts into wasted restarts-in-waiting. It says what it is: a long turn,
   // worth a look, not a restart on sight.
   if (paneState === 'busy') {
+    // ROUTERSTUCK1012: past BUSY_TRANSCRIPT_EXEMPT_CAP_MS a busy session alerts
+    // even with a moving transcript. The reader must know that it moved: that
+    // is a very long turn or a loop that keeps writing, not a frozen call.
+    if (lastProgressAgoMs != null && lastProgressAgoMs <= TRANSCRIPT_PROGRESS_FRESH_MS) {
+      const ago = Math.max(0, Math.round(lastProgressAgoMs / 60000))
+      const capH = Math.round(BUSY_TRANSCRIPT_EXEMPT_CAP_MS / 3600000)
+      return `[session-stuck] Agent '${agent}' (tmux ${session}) has been BUSY for ${min} min with ${queue}, and its transcript is still MOVING (last progress ${ago} min ago). That is either a very long turn or a loop that keeps writing (a model loop, or a tool call retried and refused again and again). Check whether the turn is getting anywhere. Do NOT restart on this alert alone. While the transcript keeps moving, this alert repeats at most once every ${capH} h.`
+    }
     return `[session-stuck] Agent '${agent}' (tmux ${session}) has been BUSY (actively working, spinner up) for ${min} min with ${queue}. Not a stall by itself -- check whether the turn is progressing or a tool call is wedged. Do NOT restart on this alert alone.`
   }
   // Card 41a0c3a3: a plan usage limit is neither a wedge nor a question. The
@@ -136,9 +151,9 @@ export function formatStuckSessionAlert(
   return `[session-stuck] Agent '${agent}' (tmux ${session}) has been not-ready for ${min} min with ${queue}. Run the delivery-stall diagnosis: check the pane (busy vs idle vs full context) and restart the agent if it is wedged.`
 }
 
-function notifyOrchestratorOfStuckSession(agent: string, session: string, stuckMs: number, pendingCount: number, paneState: PaneState | null, awaitingPermission = false, permissionAsk: PermissionPromptSummary | null = null, quotaWall: QuotaWall | null = null): void {
+function notifyOrchestratorOfStuckSession(agent: string, session: string, stuckMs: number, pendingCount: number, paneState: PaneState | null, awaitingPermission = false, permissionAsk: PermissionPromptSummary | null = null, quotaWall: QuotaWall | null = null, lastProgressAgoMs: number | null = null): void {
   try {
-    const alert = formatStuckSessionAlert(agent, MAIN_AGENT_ID, session, stuckMs, pendingCount, paneState, awaitingPermission, permissionAsk, quotaWall)
+    const alert = formatStuckSessionAlert(agent, MAIN_AGENT_ID, session, stuckMs, pendingCount, paneState, awaitingPermission, permissionAsk, quotaWall, lastProgressAgoMs)
     if (!alert) return
     createAgentMessage('system', MAIN_AGENT_ID, alert)
     logger.info({ agent, session, stuckMs, pendingCount, paneState, awaitingPermission, quotaWall: quotaWall != null, resetsAt: quotaWall?.resetsAt ?? null }, 'session-stuck surfaced to orchestrator')
@@ -198,7 +213,7 @@ export function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: str
     createAgentMessage(
       'system',
       MAIN_AGENT_ID,
-      `[handoff-failure] Inter-agent message (id ${msg.id}) ${msg.from_agent} -> ${msg.to_agent} could NOT be delivered: ${reason}. Consider re-sending or checking the target agent. Content preview: ${preview}`,
+      `[handoff-failure] Inter-agent message (id ${msg.id}) ${msg.from_agent} -> ${msg.to_agent} could NOT be delivered: ${reason}. Consider re-sending or checking the target agent (full text: GET /api/messages/${msg.id}). Content preview: ${preview}`,
     )
     logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, reason }, 'handoff-failure surfaced to orchestrator')
     // AND THE SENDER, who otherwise never finds out. Separate try/catch on
@@ -222,6 +237,25 @@ export function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: str
     logger.warn({ err, id: msg.id }, 'Failed to enqueue handoff-failure notification')
   }
 }
+// A pull agent's queue is NOT a failure, so this notice deliberately does not
+// say "could not be delivered" and the row is left pending and claimable. It
+// reports the one thing the queue cannot show by itself: the agent has not
+// been heard from since the message was written, so nobody may be polling.
+function notifyOrchestratorOfPullStale(msg: AgentMessage, ageMs: number): void {
+  try {
+    if (msg.to_agent === MAIN_AGENT_ID) return
+    const hours = Math.round(ageMs / 3600000)
+    const preview = (msg.content ?? '').slice(0, 220)
+    createAgentMessage(
+      'system',
+      MAIN_AGENT_ID,
+      `[pull-stale] Message id ${msg.id} (${msg.from_agent} -> ${msg.to_agent}) has been waiting ${hours}h in the pull queue and '${msg.to_agent}' has sent no message of its own since the row was created. It is still PENDING and will be delivered the moment the agent polls -- check whether the agent is running and polling. (Nothing here can observe a READ: the agent may well be alive and writing memories or logs. The silence measured is outgoing messages only.) Content preview: ${preview}`,
+    )
+    logger.info({ id: msg.id, to: msg.to_agent, ageMs }, 'pull-stale surfaced to orchestrator')
+  } catch (err) {
+    logger.warn({ err, id: msg.id }, 'Failed to enqueue pull-stale notification')
+  }
+}
 
 /**
  * Card 71263d15 (A), 01603e03: may the SENDER of a failed message get a notice?
@@ -239,12 +273,16 @@ export function shouldNotifySenderOfFailure(fromAgent: string, mainAgentId: stri
   return !isChannelInboundSender(fromAgent)
 }
 
-/** The sender's notice. The preview says how much it cut, so nobody answers half a message (15060). */
+/** The sender's notice. The preview says how much it cut, so nobody answers half a message (15060).
+ *  It also names where the FULL text is (GET /api/messages/<id>): the preview stops at 220
+ *  characters, and a sender re-sending a long handoff should not have to reconstruct it from
+ *  memory or from its transcript. */
 export function formatSenderFailureNotice(msg: AgentMessage, reason: string): string {
   const content = msg.content ?? ''
   const preview = content.length > 220 ? `${content.slice(0, 220)} [... +${content.length - 220} karakter]` : content
   return `[handoff-failure] A(z) ${msg.to_agent} címre küldött üzeneted (#${msg.id}) NEM kézbesült: ${reason}. ` +
-    `A visszakapott id a befogadást igazolta, nem a kézbesítést; ha még számít, küldd újra. Tartalom eleje: ${preview}`
+    `A visszakapott id a befogadást igazolta, nem a kézbesítést; ha még számít, küldd újra ` +
+    `(a teljes szöveg: GET /api/messages/${msg.id}). Tartalom eleje: ${preview}`
 }
 
 function notifySenderOfFailedHandoff(msg: AgentMessage, reason: string): void {
@@ -300,16 +338,77 @@ const agentStuckSince = new Map<string, number>()  // agent -> first tick stuck 
 // look either way.
 const BUSY_STUCK_ESCALATE_MS = 30 * 60 * 1000  // busy pane: only after a much longer watchdog
 
+// ROUTERSTUCK1012 (MODSPROBA1004): the long watchdog alone was still wrong
+// every time it was measured. 2026-10-05..10-11, trial agents: 14 busy-STUCK
+// alerts, and in all 14 the agent was working -- pane and mode busy, the
+// transcript moving within 0-5 minutes. So past the busy watchdog the router
+// also asks the transcript: progress within this window means a long turn, not
+// a wedge, and nothing is escalated. A transcript that has not moved for longer
+// (a tool call that hangs with the spinner up) still escalates, and so does a
+// transcript the router cannot read (see transcript-progress.ts).
+// 15 minutes, not 10: while a foreground tool call runs, the newest progress
+// entry is its own tool_use, and a Bash call can legitimately run to its
+// 10-minute ceiling (measured over the same week: 1848 pending-tool rows,
+// p99 9.1 min, max 9.9 min, a cluster at 9.7-9.9 min). A window AT the ceiling
+// would alert on a healthy call in the minute its result lands; a call still
+// pending past the ceiling is wedged by definition and still alerts.
+export const TRANSCRIPT_PROGRESS_FRESH_MS = 15 * 60 * 1000
+// The exemption has a ceiling. A turn that keeps writing is not proof of a
+// healthy one: a model loop, or a tool call retried and refused by a hook again
+// and again, writes progress entries forever, and with no ceiling the router
+// would never say a word while the queue grows. Past this much continuous busy
+// time the session escalates even with a moving transcript; the alert says the
+// transcript moved, and the escalation resets the timer, so a live loop alerts
+// once per this window instead of never (2026-10-13 review).
+export const BUSY_TRANSCRIPT_EXEMPT_CAP_MS = 2 * 60 * 60 * 1000
+
 /**
  * Pure decision: may a continuously not-ready session escalate now?
  *
  * `paneState` is what the pane showed at the escalation check, or null when it
  * could not be read (remote host down, tmux gone). Unreadable is NOT treated as
  * busy: a pane we cannot see is a reason to look sooner, not later.
+ *
+ * `lastProgressAt` (ms) is the newest progress entry in the agent's transcript,
+ * or null when it could not be read; it only matters for a busy pane past the
+ * long watchdog and below BUSY_TRANSCRIPT_EXEMPT_CAP_MS. Null keeps the decision
+ * exactly what it was before.
  */
-export function shouldEscalateStuckSession(paneState: PaneState | null, stuckMs: number): boolean {
-  return stuckMs > (paneState === 'busy' ? BUSY_STUCK_ESCALATE_MS : STUCK_ESCALATE_MS)
+export function shouldEscalateStuckSession(
+  paneState: PaneState | null,
+  stuckMs: number,
+  lastProgressAt: number | null = null,
+  now: number = Date.now(),
+): boolean {
+  if (paneState !== 'busy') return stuckMs > STUCK_ESCALATE_MS
+  if (stuckMs <= BUSY_STUCK_ESCALATE_MS) return false
+  if (stuckMs > BUSY_TRANSCRIPT_EXEMPT_CAP_MS) return true
+  return lastProgressAt == null || now - lastProgressAt > TRANSCRIPT_PROGRESS_FRESH_MS
 }
+
+// The transcript read behind lastProgressAt, for the router tick. A busy pane
+// past the watchdog is re-checked every tick (the stuck timer keeps running on
+// purpose), so the answer is kept for TRANSCRIPT_PROGRESS_RECHECK_MS per agent.
+// A remote agent's transcript is on another machine: null, i.e. today's rule.
+const TRANSCRIPT_PROGRESS_RECHECK_MS = 60 * 1000
+const agentProgressChecked = new Map<string, { at: number; value: number | null }>()
+
+export async function agentTranscriptProgressAt(agent: string, host: string | null | undefined, now: number): Promise<number | null> {
+  if (host) return null
+  const cached = agentProgressChecked.get(agent)
+  if (cached && now - cached.at < TRANSCRIPT_PROGRESS_RECHECK_MS) return cached.value
+  let value: number | null = null
+  try {
+    value = await readTranscriptProgressAt(projectsDirFor(agentDir(agent), resolveAgentConfigDirForRead(agent) ?? undefined))
+  } catch {
+    value = null
+  }
+  agentProgressChecked.set(agent, { at: now, value })
+  return value
+}
+
+/** Test hook: forget the remembered transcript reads. */
+export function resetTranscriptProgressCacheForTests(): void { agentProgressChecked.clear() }
 
 // A quota wall does not change between two escalation windows: the CLI waits
 // for the reset (a five-hour window resets within five hours by definition),
@@ -393,14 +492,18 @@ export function detectUrgentPaneHold(pane: string | null): UrgentPaneHold | null
 /**
  * Pure: the last look at the pane inside the send lane, right before the first key
  * (sendPromptToSession's emitGuard). Stricter than detectUrgentPaneHold: any blocking
- * menu, and a pane that cannot be read, refuse too -- here no later step could undo an
- * Enter that landed in the wrong place. null = type.
+ * menu, a held peer message, and a pane that cannot be read, refuse too -- here no
+ * later step could undo an Enter that landed in the wrong place. The held peer message
+ * is checked on its own because detectsBlockingMenu leaves it out (the menu pass must
+ * not Escape it), and its Enter would deliver the held message on the user's behalf.
+ * null = type.
  */
 export function urgentEmitRefusal(pane: string | null): string | null {
   if (pane == null || !pane.trim()) return 'pane unreadable'
   const hold = detectUrgentPaneHold(pane)
   if (hold) return hold.kind
   if (detectsBlockingMenu(pane)) return 'blocking-menu'
+  if (detectsHeldPeerMessage(pane)) return 'held-peer-message'
   return null
 }
 
@@ -465,6 +568,9 @@ const agentBatchedThisReconnect = new Set<string>()
 // dashboard start, so a restart cannot make an old message look abandoned: the clock
 // starts at the router's first observation, not at the message's creation.
 const agentAbsentSince = new Map<string, number>()
+// Agents whose delivery hold this router has reported (delivery-hold.ts): one line
+// when a hold starts and one when it ends, not one per 5 s tick.
+const heldAgentsLogged = new Set<string>()
 
 /** Card 71263d15 (A): continuous absence of `agent` at `now`; 0 while present or not yet seen absent. */
 function continuousAbsenceMs(agent: string, sessionExists: boolean, now: number): number {
@@ -498,6 +604,36 @@ function continuousAbsenceMs(agent: string, sessionExists: boolean, now: number)
  */
 export function shouldAbandon(sessionExists: boolean, absentForMs: number, windowMs: number): boolean {
   return !sessionExists && absentForMs > windowMs
+}
+
+// A pull agent's row is never abandoned, so the queue can grow silently if the
+// agent stops polling -- exactly the invented-success shape the worksource
+// carve-out was reviewed for (PR #1099). The honest answer is not to close the
+// row (that would hide it again, which is the bug this fixes) but to SAY SO:
+// warn the orchestrator once per message when the row is old AND the agent has
+// shown no API activity since it was written. Silence from the agent is the
+// signal; the row stays pending and deliverable the moment it polls.
+export const PULL_STALE_WARN_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Pure decision: should a pending message to a PULL-delivery agent raise the
+ * staleness warning?
+ *
+ * @param ageMs        How long the message has been pending (ms).
+ * @param createdMs    When the message was created (epoch ms).
+ * @param lastSeenMs   Last API activity from the target agent (epoch ms), or null.
+ * @param windowMs     Age past which an unseen message is considered stale.
+ */
+export function shouldWarnPullStale(
+  ageMs: number,
+  createdMs: number,
+  lastSeenMs: number | null,
+  windowMs: number,
+): boolean {
+  if (ageMs <= windowMs) return false
+  // Activity AFTER the message was written means the agent is polling and has
+  // had the row in front of it; that is its business, not a delivery fault.
+  return lastSeenMs == null || lastSeenMs <= createdMs
 }
 
 // ---- Distributed trace context (card def5a189) ------------------------------
@@ -616,7 +752,8 @@ export async function deliverFederatedBatch(federated: AgentMessage[], now: numb
 }
 
 export function startMessageRouter(): NodeJS.Timeout {
-  return setInterval(async () => {
+  // KILLSWITCH1022: a frozen fleet gets nothing delivered; the rows wait.
+  return setInterval(whileNotFrozen('message-router', async () => {
     // Re-entrancy guard: STT can hold a tick for up to 65s; skip new ticks
     // while the previous one is still in flight to prevent double-delivery.
     if (_tickRunning) return
@@ -626,7 +763,7 @@ export function startMessageRouter(): NodeJS.Timeout {
     } finally {
       _tickRunning = false
     }
-  }, 5000)
+  }), 5000)
 }
 
 // Per-receiver batched-message-id set for the CURRENT tick. Built by the
@@ -648,6 +785,9 @@ function batchDeliverBacklog(agent: string, agentPending: AgentMessage[], now: n
   const old: typeof agentPending = []
   const recent: typeof agentPending = []
   for (const m of agentPending) {
+    // Card ad771121: a row above normal is never folded into the summary; it is delivered on its own,
+    // first. That is a STOP, an urgent row, a system or owner row (review point 1), or a granted high.
+    if (deliveryRank(m) > 0) { recent.push(m); continue }
     const age = now - m.created_at * 1000
     if (age > RECONNECT_BATCH_AGE_MS) {
       old.push(m)
@@ -708,7 +848,9 @@ export async function runMessageRouterTick(): Promise<void> {
     // pattern. The window is chosen FAIRLY across recipients (selectTickWindow,
     // card fc5748f5): the globally oldest rows of busy recipients used to fill it
     // and starve every other recipient, idle ones included. Each recipient's own
-    // rows stay oldest first.
+    // rows stay in delivery order (card ad771121: high first, then oldest first);
+    // when more recipients wait than the window holds, a high row also brings its
+    // recipient in first (see selectTickWindow).
     //
     // Federated (slash-qualified) recipients are split out FIRST: they must
     // never reach the local path (agentSessionName / readAgentRemoteHost would
@@ -717,9 +859,41 @@ export async function runMessageRouterTick(): Promise<void> {
     const allPending = getPendingMessages()
     const localPending: AgentMessage[] = []
     const federatedPending: AgentMessage[] = []
-    for (const m of allPending) (isQualifiedId(m.to_agent) ? federatedPending : localPending).push(m)
-    const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
     const now = Date.now()
+    // An agent the context-guard is restarting is held (delivery-hold.ts): its rows
+    // stay pending and go to the fresh session after its resume prompt. They are
+    // taken out BEFORE the window is chosen, so a held backlog cannot fill the
+    // window and starve every other recipient while it waits. An authenticated STOP
+    // or urgent row (isUrgentDelivery) is never held: it goes now, to whichever pane
+    // is up, with its usual pane checks. A STOP held for the length of a restart
+    // would arrive after the work it was meant to stop.
+    const held = new Map<string, { hold: DeliveryHold; rows: number }>()
+    // One answer per recipient per tick, "not held" included: a probe that fails
+    // (and warns) must not do so once per pending row.
+    const holdOf = new Map<string, DeliveryHold | null>()
+    for (const m of allPending) {
+      if (isQualifiedId(m.to_agent)) { federatedPending.push(m); continue }
+      if (!holdOf.has(m.to_agent)) holdOf.set(m.to_agent, deliveryHoldFor(m.to_agent, now))
+      const hold = holdOf.get(m.to_agent)
+      if (hold && !isUrgentDelivery(m, MAIN_AGENT_ID)) { held.set(m.to_agent, { hold, rows: (held.get(m.to_agent)?.rows ?? 0) + 1 }); continue }
+      localPending.push(m)
+    }
+    for (const [agent, { hold, rows }] of held) {
+      // The pane this clock was timing is being replaced; carried across the
+      // restart it would time the fresh session from the old one's start.
+      agentStuckSince.delete(agent)
+      if (!heldAgentsLogged.has(agent)) {
+        heldAgentsLogged.add(agent)
+        logger.info({ agent, phase: hold.phase, untilMs: hold.untilMs, pending: rows }, 'message-router: delivery held -- context-guard restart in progress, rows stay pending for the fresh session')
+      }
+    }
+    for (const agent of heldAgentsLogged) {
+      if (!held.has(agent) && !deliveryHoldFor(agent, now)) {
+        heldAgentsLogged.delete(agent)
+        logger.info({ agent }, 'message-router: delivery hold released')
+      }
+    }
+    const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
     // ---- update absent/present tracking for all receivers in this tick ----
     // Rebuild the stuck-detector's view of which agents are absent RIGHT NOW.
     // Shared across all messages to the same agent (one sessionExistsOnHost call
@@ -727,7 +901,10 @@ export async function runMessageRouterTick(): Promise<void> {
     // main loop can reuse them instead of re-calling sessionExistsOnHost.
     const receiversInTick = new Set<string>()
     for (const m of pending) {
-      if (m.to_agent !== MAIN_AGENT_ID) receiversInTick.add(m.to_agent)
+      // Pull-delivery receivers are excluded on purpose: they have no session
+      // here, so probing for one would only feed the absent/stuck trackers a
+      // permanent "absent" and invite a reconnect batch that can never fire.
+      if (m.to_agent !== MAIN_AGENT_ID && !readAgentPullDelivery(m.to_agent)) receiversInTick.add(m.to_agent)
     }
     const absentNow = new Set<string>()
     const presentNow = new Set<string>()
@@ -755,11 +932,17 @@ export async function runMessageRouterTick(): Promise<void> {
       // in pending/ and get handed over one at a time, acknowledged one at a
       // time. Summarising them away would DISCARD work that was never lost.
       if (agentSessionCache.get(agent)?.worksource) continue
+      // A held agent is not batched either: its ordinary rows were held, not missed,
+      // and go one by one after the release. It is a receiver here only through an
+      // exempt STOP or urgent row, and the restart can show it absent for a tick.
+      if (holdOf.get(agent)) continue
       if (agentWasAbsent.has(agent) && !agentBatchedThisReconnect.has(agent)) {
         // Check if this agent qualifies for backlog batching.
         const agentPending = getPendingMessages(agent)
         if (agentPending.length > RECONNECT_BATCH_THRESHOLD) {
-          const oldestAge = now - agentPending[0].created_at * 1000
+          // Card ad771121: the list is in delivery order (high first), so its head is not
+          // necessarily the oldest row; the age is the oldest row's, as before.
+          const oldestAge = now - Math.min(...agentPending.map((m) => m.created_at)) * 1000
           if (oldestAge > RECONNECT_BATCH_AGE_MS) {
             logger.warn({ agent, pendingCount: agentPending.length, oldestAgeMs: oldestAge },
               'message-router: reconnect-backlog batch — summarizing old messages')
@@ -832,6 +1015,25 @@ export async function runMessageRouterTick(): Promise<void> {
       // abort-on-busy send, stale-spell escalation, owner alert, hourly budget),
       // so the router simply leaves the row for the PULL path to claim.
       if (isMainAgent) continue
+
+      // PULL-delivery agents (own machine, own scoped token, no session here)
+      // skip the whole tmux path BEFORE any session lookup: there is nothing to
+      // look up, and the abandon gate below would flip the row to `failed`,
+      // which removes it from the `status=pending` inbox the agent polls. The
+      // row waits here until the agent claims it.
+      if (readAgentPullDelivery(msg.to_agent)) {
+        if (!pullStaleNotified.has(msg.id)) {
+          const lastSeen = lastMessageFromAgentAt(msg.to_agent)
+          if (shouldWarnPullStale(ageMs, msg.created_at * 1000, lastSeen == null ? null : lastSeen * 1000, PULL_STALE_WARN_MS)) {
+            pullStaleNotified.add(msg.id)
+            logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs, lastSeen },
+              'pull-delivery agent has not polled since this message was written')
+            notifyOrchestratorOfPullStale(msg, ageMs)
+          }
+        }
+        continue
+      }
+
       // Use cached session data from the pre-pass (one sessionExistsOnHost call
       // per unique receiver per tick). Fall back to a direct call for agents not
       // in the pending set (shouldn't happen, but safe).
@@ -955,7 +1157,12 @@ export async function runMessageRouterTick(): Promise<void> {
           const stuckMs = now - stuckStart
           const pane = capturePane(session, host)
           const paneState = pane != null ? detectPaneState(pane) : null
-          if (shouldEscalateStuckSession(paneState, stuckMs)) {
+          // ROUTERSTUCK1012: the transcript is read only where today's rule
+          // would escalate a busy pane, so the healthy path costs nothing.
+          const lastProgressAt = paneState === 'busy' && stuckMs > BUSY_STUCK_ESCALATE_MS
+            ? await agentTranscriptProgressAt(msg.to_agent, host, now)
+            : null
+          if (shouldEscalateStuckSession(paneState, stuckMs, lastProgressAt, now)) {
             // Session has been continuously stuck past the escalation threshold.
             // Log at warn level so monitoring/revival tooling can act — the
             // stuck-input-watcher and channel-monitor pick these patterns up.
@@ -965,6 +1172,7 @@ export async function runMessageRouterTick(): Promise<void> {
               stuckDurationMs: stuckMs,
               pendingMsgCount,
               paneState,
+              lastProgressAgoMs: lastProgressAt != null ? now - lastProgressAt : null,
             }, 'message-router: session STUCK — continuously not-ready past escalation threshold')
             // Card 0a641b52: a log line nobody reads is not an alert. Surface the
             // stall to the main agent's inbox so it can run the delivery-stall
@@ -987,7 +1195,7 @@ export async function runMessageRouterTick(): Promise<void> {
               }, 'message-router: session at the plan usage limit -- this wall was already alerted, staying quiet')
             } else {
               if (wallStep.kind === 'alert') agentQuotaWallAlerted.set(msg.to_agent, { key: wallStep.key, at: now })
-              notifyOrchestratorOfStuckSession(msg.to_agent, session, stuckMs, pendingMsgCount, paneState, awaitingPermission, permissionAsk, wallStep.kind === 'alert' ? quotaWall : null)
+              notifyOrchestratorOfStuckSession(msg.to_agent, session, stuckMs, pendingMsgCount, paneState, awaitingPermission, permissionAsk, wallStep.kind === 'alert' ? quotaWall : null, lastProgressAt != null ? now - lastProgressAt : null)
             }
             // Reset timer so we don't spam every tick; re-escalate after another window.
             agentStuckSince.set(msg.to_agent, now)
@@ -997,6 +1205,7 @@ export async function runMessageRouterTick(): Promise<void> {
             // never ends still reaches BUSY_STUCK_ESCALATE_MS.
             logger.debug({
               to: msg.to_agent, session, stuckDurationMs: stuckMs, paneState,
+              lastProgressAgoMs: lastProgressAt != null ? now - lastProgressAt : null,
             }, 'message-router: not-ready but pane is busy — deferring stuck escalation')
           }
         }
@@ -1116,6 +1325,21 @@ export async function runMessageRouterTick(): Promise<void> {
             { id: msg.id, from: msg.from_agent, to: msg.to_agent, liveStatus },
             'message-router: row is no longer pending at send time, skipping delivery',
           )
+          continue
+        }
+        // The hold, re-read for the same reason: the one taken at the top of the
+        // tick is a snapshot, and the guard can start a restart sequence while this
+        // tick awaits (readiness probes, STT). Nothing awaits between here and the
+        // send, so a hold set mid-tick is honoured before anything is pasted. The
+        // row stays pending; it is not a failure. A STOP or urgent row is exempt,
+        // as at the top of the tick.
+        const lateHold = isStop ? null : deliveryHoldFor(msg.to_agent, Date.now())
+        if (lateHold) {
+          // Same once-per-hold log as the top of the tick; the release is logged there.
+          if (!heldAgentsLogged.has(msg.to_agent)) {
+            heldAgentsLogged.add(msg.to_agent)
+            logger.info({ agent: msg.to_agent, phase: lateHold.phase, untilMs: lateHold.untilMs }, 'message-router: delivery held -- context-guard restart started during this tick, rows stay pending for the fresh session')
+          }
           continue
         }
         // channel-inbound carries the STT-applied deliveryContent; the agent
@@ -1319,7 +1543,9 @@ function collectBatchMates(
   for (let i = start; i < pending.length; i++) {
     const m = pending[i]
     if (m.to_agent !== head.to_agent) continue
-    if (m.id <= head.id) continue                 // ascending only
+    // After the head in the DELIVERY order only (card ad771121): a high head is newer than the normal
+    // rows that follow it, so the old id comparison would have left them out of its batch.
+    if (compareDeliveryOrder(m, head) <= 0) continue
     if (batchedMsgIdsThisTick.has(m.id)) continue
     const cls = classifyAgentMessage(m.from_agent, m.to_agent)
     if (!cls || cls.category === 'channel-inbound' || cls.category === 'federated') continue

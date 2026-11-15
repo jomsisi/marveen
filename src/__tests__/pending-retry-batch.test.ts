@@ -134,6 +134,13 @@ vi.mock('../channel-provider.js', async (importOriginal) => {
     }),
   }
 })
+// v1.45.0: the scheduled-task registry gate is covered elsewhere; here it is a passthrough.
+vi.mock('../web/schedule-registry.js', () => ({
+  filterRegisteredTasks: <T,>(tasks: T[]) => tasks,
+  backfillScheduledTaskRegistryOnce: () => ({ ran: false, registered: [] }),
+  verifyScheduledTask: () => ({ ok: true }),
+  describeVerdict: () => '',
+}))
 vi.mock('../web/scheduled-tasks-io.js', () => ({
   listScheduledTasks: () => mockListScheduledTasks(),
   // v1.43.0: the runner re-reads the CURRENT definition of a queued task.
