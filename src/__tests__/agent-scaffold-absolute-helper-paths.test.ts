@@ -54,6 +54,7 @@ vi.mock('../config.js', () => ({
   OWNER_DRIVE_FOLDER: '',
   DASHBOARD_PUBLIC_URL: '',
   AGENT_API_ORIGIN: '',
+  STORE_DIR: join(tmpRoot, 'store'),
   APP_TZ: 'Europe/Budapest',
 }))
 
