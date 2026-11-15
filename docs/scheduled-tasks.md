@@ -316,8 +316,11 @@ Korlátok:
 - a hash a feladat SAJÁT könyvtárát fedi (és a `preCheck` szkriptet, bárhová mutat, a repó `scripts/` kivételével).
   Ha egy `command` vagy egy prompt egy MÁSIK feladat könyvtárába, vagy a repó `scripts/`-én kívül bárhová mutat,
   azt a tartalmat a nyilvántartás nem látta, és a védelem nem fedi;
-- mivel a könyvtár minden fájlja a hash része, egy kézzel odatett fájl (akár egy szerkesztő mentési másolata,
-  `.bak`, `.swp`) is megállítja a feladatot, amíg át nem nézed és újra nem regisztrálod;
+- mivel a könyvtár fájljai a hash részei, egy kézzel odatett fájl (pl. `.swp`) megállítja a feladatot, amíg át nem
+  nézed és újra nem regisztrálod. FORK-KIVÉTEL: a mentési másolat nevű fájlok NEM számítanak (fájlnév alapján, a
+  gyökérben és az almappákban is): `SKILL.md.*`, `task-config.json.*`, `*.bak`, `*.bak-*`, `*-ELOTTE-*`, `*.orig`,
+  `*.rej`, `*~` (`isTaskDirBackupName`, `scheduled-tasks-io.ts`); a `SKILL.md`, a `task-config.json`, a szkriptek és a
+  `references/` továbbra is számítanak;
 - 500 bejegyzés vagy 16 MiB tartalom fölötti feladatkönyvtárnak nincs hash-e: nem regisztrálható és nem fut
   (a log egyszer kiírja);
 - a nyilvántartás ugyanannak a felhasználónak írható DB-ben van, tehát a védelem a CSAK-fájl alapú

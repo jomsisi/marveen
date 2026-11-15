@@ -304,6 +304,19 @@ export const TASK_DIR_MAX_FILES = 500
 export const TASK_DIR_MAX_BYTES = 16 * 1024 * 1024
 export class TaskDirTooLargeError extends Error {}
 
+// FORK (v1.49.1 merge): editor / hand-made backup copies kept inside a task dir are not part of the trusted
+// content. The fleet leaves `SKILL.md.<date>-ELOTTE-*` style copies next to the task (one live task dir holds 116
+// files), and without this every new copy flipped the task to hash-mismatch and stopped it. Matched on the file
+// NAME only, at the dir root and in every subdirectory; directories are never skipped by name, and SKILL.md,
+// task-config.json, scripts, references/ and every other file still count. A preCheck script is hashed through its
+// own path (preCheckHashTarget), so naming it `x.bak` does not hide it.
+const BACKUP_NAME_RES: readonly RegExp[] = [
+  /^SKILL\.md\..+/, /^task-config\.json\..+/, /\.bak$/, /\.bak-/, /-ELOTTE-/, /\.orig$/, /\.rej$/, /~$/,
+]
+export function isTaskDirBackupName(name: string): boolean {
+  return BACKUP_NAME_RES.some((re) => re.test(name))
+}
+
 export function taskDirExtraParts(taskDir: string): TaskDirPart[] {
   const parts: TaskDirPart[] = []
   let bytes = 0
@@ -327,10 +340,12 @@ export function taskDirExtraParts(taskDir: string): TaskDirPart[] {
         // A broken symlink (or an entry that vanished): hash what it is, not nothing.
         let link: Buffer | null = null
         try { if (lstatSync(childAbs).isSymbolicLink()) link = Buffer.from(readlinkSync(childAbs), 'utf-8') } catch { /* gone */ }
+        if (isTaskDirBackupName(name)) continue
         parts.push({ label: `broken:${childRel}`, buf: link })
         continue
       }
       if (st.isDirectory()) { walk(childAbs, childRel); continue }
+      if (isTaskDirBackupName(name)) continue
       if (!st.isFile()) { parts.push({ label: `special:${childRel}`, buf: null }); continue }
       bytes += st.size
       if (bytes > TASK_DIR_MAX_BYTES) throw new TaskDirTooLargeError(`more than ${TASK_DIR_MAX_BYTES} bytes`)

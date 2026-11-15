@@ -618,7 +618,11 @@ describe('scheduled-task registry: the whole task dir is hashed', () => {
 
   it('adding a file, removing a file, or renaming one each stops the task', async () => {
     await registeredWith('dir-add', { 'run.sh': 'echo hi\n' })
+    // FORK (v1.49.1 merge): a backup copy (`*.bak`, `*-ELOTTE-*`, ...) is NOT trusted content and does not stop
+    // the task; any other added file does (see schedule-hash-backup-files.test.ts for the full pattern list).
     writeFileSync(join(dirOf('dir-add'), 'run.sh.bak'), 'echo hi\n')
+    expect(cronGatePasses('dir-add')).toBe(true)
+    writeFileSync(join(dirOf('dir-add'), 'run.sh.extra'), 'echo hi\n')
     expect(cronGatePasses('dir-add')).toBe(false)
 
     await registeredWith('dir-remove', { 'run.sh': 'echo hi\n' })
