@@ -85,6 +85,9 @@ const mockReady = vi.fn(() => false)
 // this suite is about -- the runner ticks several times inside the test
 // window, and with an always-true stamp every tick would re-alert.
 const claimedRows = new Set<string>()
+// MERGE (v1.37.0): the owner-facing message now claims the OWNER stamp
+// (owner_alert_sent_at); the alert_sent_at stamp belongs to upstream's stage-1
+// main-agent notice, which is a different message (an inter-agent one).
 const mockMarkAlert = vi.fn((taskName: string, agentName: string, ts: number) => {
   const key = `${taskName}@${agentName}`
   if (claimedRows.has(key)) return false
@@ -94,7 +97,7 @@ const mockMarkAlert = vi.fn((taskName: string, agentName: string, ts: number) =>
   // key kept every row "due" forever and hid an early return that made the
   // two-hour repeat unreachable in production.
   for (const r of mockListPendingRetries() as Array<Record<string, unknown>>) {
-    if (r.task_name === taskName && r.agent_name === agentName) r.alert_sent_at = ts
+    if (r.task_name === taskName && r.agent_name === agentName) r.owner_alert_sent_at = ts
   }
   return true
 })
@@ -109,8 +112,11 @@ vi.mock('../db.js', () => ({
   deletePendingTaskRetry: vi.fn(),
   updatePendingTaskRetry: vi.fn(() => true),
   insertPendingTaskRetryIfNew: vi.fn(),
-  markPendingTaskRetryAlert: (taskName: string, agentName: string, ts: number) => mockMarkAlert(taskName, agentName, ts),
+  markPendingTaskRetryAlert: vi.fn(() => true),
   clearPendingTaskRetryAlert: vi.fn(),
+  markPendingTaskRetryOwnerAlert: (taskName: string, agentName: string, ts: number) => mockMarkAlert(taskName, agentName, ts),
+  clearPendingTaskRetryOwnerAlert: vi.fn(),
+  createAgentMessage: vi.fn(() => 0),
   markScheduledTaskKanbanWaiting: vi.fn(),
 }))
 // The alert path resolves a REAL install-level token (HOME-based, a test
@@ -163,7 +169,7 @@ function row(name: string, ageMin: number) {
     task_name: name, agent_name: 'boss',
     first_attempt: now - ageMin * 60_000,
     last_attempt: now - 60_000,
-    attempt_count: 40, last_reason: 'busy', alert_sent_at: null,
+    attempt_count: 40, last_reason: 'busy', alert_sent_at: null, owner_alert_sent_at: null,
   }
 }
 

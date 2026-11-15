@@ -1,20 +1,24 @@
-// Contract tests for the SECOND status-change path: updateKanbanCard, behind PUT /api/kanban/:id.
+// Contract tests for the kanban status-change audit trail on the UPDATE path.
 //
-// moveKanbanCard has recorded a kanban_card_events row since the events table existed;
-// updateKanbanCard wrote the same `status` column with no event at all. Two routes to one
-// transition, one of them silent -- and the silence was invisible, because the card's own state
-// came out correct either way. Measured 2026-08-31 on the live board: of the cards created after
-// the events table started, 110 of 141 have no event at all.
+// moveKanbanCard (the dashboard's drag-and-drop) has always recorded a
+// kanban_card_events row. updateKanbanCard -- the path behind PUT
+// /api/kanban/:id, which is what every agent and every script uses -- recorded
+// none. Measured 2026-08-29 on the live board: 8 events in the whole table, the
+// newest 6 weeks old, so "when did this card become in_progress" could not be
+// answered for essentially any card.
 //
-// These call the real production entry points on an in-memory database, the same way
-// kanban-move-audit.test.ts does; the route-level cases drive tryHandleKanban so the actor wiring
-// is measured where it actually lives.
+// These tests call the real production entry points on an in-memory database,
+// the same way kanban-move-audit.test.ts does for the move path.
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Readable } from 'node:stream'
 import {
-  initDatabase, createKanbanCard, updateKanbanCard, moveKanbanCard,
-  getKanbanCardEvents, getKanbanCard,
+  initDatabase,
+  createKanbanCard,
+  updateKanbanCard,
+  moveKanbanCard,
+  getKanbanCard,
+  getKanbanCardEvents,
 } from '../db.js'
 import { tryHandleKanban } from '../web/routes/kanban.js'
 import type { RouteContext } from '../web/routes/types.js'
@@ -37,81 +41,95 @@ function putCtx(id: string, payload: unknown): { ctx: RouteContext; out: { statu
 }
 
 describe('kanban update audit trail', () => {
-  it('records exactly one event with correct from/to status on a status change', () => {
-    createKanbanCard({ id: 'card-a', title: 'Edited card' })
+  it('records one event with correct from/to status and actor on a status change', () => {
+    createKanbanCard({ id: 'card-a', title: 'Audited card' })
 
-    expect(updateKanbanCard('card-a', { status: 'in_progress' }, 'sanyiba')).toBe(true)
+    expect(updateKanbanCard('card-a', { status: 'in_progress' }, 'devy')).toBe(true)
 
     const events = getKanbanCardEvents('card-a')
     expect(events).toHaveLength(1)
+    expect(events[0].card_id).toBe('card-a')
     expect(events[0].from_status).toBe('planned')
     expect(events[0].to_status).toBe('in_progress')
-    expect(events[0].actor).toBe('sanyiba')
+    expect(events[0].actor).toBe('devy')
     expect(typeof events[0].created_at).toBe('number')
   })
 
-  it('records no event when the edit does not touch the status', () => {
-    // The common case by far: a title or description edit from the dashboard form. If this wrote
-    // an event, every wording fix would look like a status change in the timeline.
-    createKanbanCard({ id: 'card-b', title: 'Card', description: 'before' })
+  it('records no event when a non-status field changes', () => {
+    createKanbanCard({ id: 'card-b', title: 'Renamed card' })
 
-    expect(updateKanbanCard('card-b', { description: 'after' }, 'sanyiba')).toBe(true)
+    expect(updateKanbanCard('card-b', { title: 'New title', priority: 'high' }, 'devy')).toBe(true)
     expect(getKanbanCardEvents('card-b')).toHaveLength(0)
-    expect(getKanbanCard('card-b')?.description).toBe('after')
+    expect(getKanbanCard('card-b')?.title).toBe('New title')
   })
 
-  it('records no event when the status is re-sent unchanged', () => {
-    // The dashboard form posts the whole card back, status included. Resending the same value is
-    // not a transition, and the guard compares against the row as it stood BEFORE the write.
-    createKanbanCard({ id: 'card-c', title: 'Card', status: 'waiting' })
+  it('records no event when the caller echoes the unchanged status back', () => {
+    // The dashboard's edit form PUTs the whole card, status included. Treating
+    // that as a transition would bury the real ones in noise.
+    createKanbanCard({ id: 'card-c', title: 'Full-card PUT' })
 
-    expect(updateKanbanCard('card-c', { status: 'waiting', title: 'Renamed' }, 'sanyiba')).toBe(true)
+    expect(updateKanbanCard('card-c', { title: 'Edited', status: 'planned' }, 'devy')).toBe(true)
     expect(getKanbanCardEvents('card-c')).toHaveLength(0)
   })
 
   it('records no event when no row matches', () => {
-    expect(updateKanbanCard('nonexistent-card', { status: 'done' }, 'sanyiba')).toBe(false)
+    expect(updateKanbanCard('nonexistent-card', { status: 'done' }, 'devy')).toBe(false)
     expect(getKanbanCardEvents('nonexistent-card')).toHaveLength(0)
   })
 
-  it('leaves actor null when none is supplied', () => {
-    // NOT merely backward compatibility: null is the DEFAULT, because the only identity available
-    // on this path would come from a different namespace than the agent ids the column holds.
+  it('leaves actor null when none is supplied (existing callers pass two args)', () => {
     createKanbanCard({ id: 'card-d', title: 'No actor' })
 
     expect(updateKanbanCard('card-d', { status: 'waiting' })).toBe(true)
+
     const events = getKanbanCardEvents('card-d')
     expect(events).toHaveLength(1)
     expect(events[0].actor).toBeNull()
   })
 
-  it('the two paths write ONE chronological trail for the same card', () => {
-    // The point of the fix: whichever route a transition took, the history reads as one sequence.
-    createKanbanCard({ id: 'card-e', title: 'Both paths' })
+  it('interleaves with move events into one chronological history per card', () => {
+    // The two paths write the same table, so a card picked up by an agent (PUT)
+    // and later dragged by the owner (move) reads as a single timeline.
+    createKanbanCard({ id: 'card-e', title: 'Mixed path card' })
 
-    moveKanbanCard('card-e', 'in_progress', 0, 'boss')
-    updateKanbanCard('card-e', { status: 'waiting' }, 'sanyiba')
-    moveKanbanCard('card-e', 'done', 0, 'boss')
+    updateKanbanCard('card-e', { status: 'in_progress' }, 'devy')
+    moveKanbanCard('card-e', 'waiting', 0, 'zsolt')
+    updateKanbanCard('card-e', { status: 'done' }, 'devy')
 
     const events = getKanbanCardEvents('card-e')
     expect(events.map((e) => e.to_status)).toEqual(['in_progress', 'waiting', 'done'])
     expect(events.map((e) => e.from_status)).toEqual(['planned', 'in_progress', 'waiting'])
-    expect(events.map((e) => e.actor)).toEqual(['boss', 'sanyiba', 'boss'])
+    expect(events.map((e) => e.actor)).toEqual(['devy', 'zsolt', 'devy'])
     for (let i = 1; i < events.length; i++) {
+      expect(events[i].created_at).toBeGreaterThanOrEqual(events[i - 1].created_at)
       expect(events[i].id).toBeGreaterThan(events[i - 1].id)
     }
   })
 
+  it('answers how long a card has been in its current status', () => {
+    // The question the empty table could not answer. Kept as a test so the
+    // guarantee survives even if no dashboard ever renders it.
+    createKanbanCard({ id: 'card-f', title: 'Timing card' })
+    updateKanbanCard('card-f', { status: 'in_progress' }, 'devy')
+
+    const events = getKanbanCardEvents('card-f')
+    const enteredCurrent = events.filter((e) => e.to_status === 'in_progress').at(-1)
+    expect(enteredCurrent).toBeDefined()
+    expect(getKanbanCard('card-f')?.status).toBe('in_progress')
+    expect(enteredCurrent!.created_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
+  })
+
+  // Route-level wiring (fork addition, kept next to upstream's db-level cases).
   it('PUT /api/kanban/:id records the transition, with the actor from the body', async () => {
     // The wiring, measured where it lives: without the route passing it on, the actor would be
     // null here and only the db-level tests above would notice the difference.
-    createKanbanCard({ id: 'card-f', title: 'Through the route' })
+    createKanbanCard({ id: 'card-r1', title: 'Through the route' })
 
-    const { ctx, out } = putCtx('card-f', { status: 'done', actor: 'sanyiba' })
+    const { ctx, out } = putCtx('card-r1', { status: 'done', actor: 'sanyiba' })
     expect(await tryHandleKanban(ctx)).toBe(true)
     expect(out.body).toEqual({ ok: true })
 
-    const events = getKanbanCardEvents('card-f')
+    const events = getKanbanCardEvents('card-r1')
     expect(events).toHaveLength(1)
     expect(events[0].from_status).toBe('planned')
     expect(events[0].to_status).toBe('done')
@@ -119,12 +137,12 @@ describe('kanban update audit trail', () => {
   })
 
   it('PUT /api/kanban/:id records the transition with a null actor when the body omits one', async () => {
-    createKanbanCard({ id: 'card-g', title: 'Through the route, anonymous' })
+    createKanbanCard({ id: 'card-r2', title: 'Through the route, anonymous' })
 
-    const { ctx } = putCtx('card-g', { status: 'done' })
+    const { ctx } = putCtx('card-r2', { status: 'done' })
     expect(await tryHandleKanban(ctx)).toBe(true)
 
-    const events = getKanbanCardEvents('card-g')
+    const events = getKanbanCardEvents('card-r2')
     expect(events).toHaveLength(1)
     expect(events[0].to_status).toBe('done')
     expect(events[0].actor).toBeNull()

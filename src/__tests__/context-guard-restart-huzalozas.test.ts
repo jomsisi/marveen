@@ -49,6 +49,8 @@ vi.mock('../web/channel-monitor.js', () => ({
   hardRestartMarveenChannels: vi.fn(() => ({ ok: true })),
   lastMainRespawnAt: () => null,
   MARVEEN_POST_RESPAWN_GRACE_MS: 0,
+  // v1.37.0 (DANICTXHUROK906): performRestart claims the reconcile grace window first.
+  markAgentRestartPending: vi.fn(),
 }))
 vi.mock('../web/stuck-tool-call-watcher.js', () => ({ shouldDeferForRecentRespawn: () => false }))
 vi.mock('../web/agent-process.js', () => ({

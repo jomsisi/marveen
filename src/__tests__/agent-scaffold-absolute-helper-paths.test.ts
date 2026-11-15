@@ -53,6 +53,7 @@ vi.mock('../config.js', () => ({
   WEB_PORT: 3420,
   OWNER_DRIVE_FOLDER: '',
   DASHBOARD_PUBLIC_URL: '',
+  AGENT_API_ORIGIN: '',
   APP_TZ: 'Europe/Budapest',
 }))
 

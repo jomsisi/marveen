@@ -51,6 +51,9 @@ vi.mock('../db.js', () => ({
   insertPendingTaskRetryIfNew: vi.fn(),
   markPendingTaskRetryAlert: vi.fn(() => false),
   clearPendingTaskRetryAlert: vi.fn(),
+  // v1.37.0 merge: the owner-facing alert claims its own stamp (pinned to the 60 min threshold).
+  markPendingTaskRetryOwnerAlert: vi.fn(() => false),
+  clearPendingTaskRetryOwnerAlert: vi.fn(),
   markScheduledTaskKanbanWaiting: vi.fn(),
 }))
 
