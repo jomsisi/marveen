@@ -4,7 +4,7 @@
 // owner gate (first-run setup only through mayActAsOwnerOrFirstRun). Real resolveAuth, real sessions, real device keys.
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import type http from 'node:http'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -209,9 +209,10 @@ describe('which call site asks which predicate (source pin, every route file)', 
     }
   })
   it('credential issuance: the owner gate, and the first-run setup only for the first login, the first device and the onboarding', () => {
-    // auth.ts mayActAsOwner: users list, key revoke, user delete, and the one inside mayActAsOwnerOrFirstRun;
-    // first-run: the first user and the first key mint.
-    for (const [f, n, first] of [['auth.ts', 4, 2], ['security.ts', 0, 1], ['operator-access.ts', 1, 0], ['onboarding.ts', 1, 2], ['claude-plans-login.ts', 1, 1]] as const) {
+    // auth.ts mayActAsOwner: users list, key revoke, user delete, the one inside mayActAsOwnerOrFirstRun, and the
+    // user create's branch decided once (ONBOARDOWNERPW1107: the owner's proof, or the first-run pass recounted
+    // before the insert); first-run: the first user and the first key mint.
+    for (const [f, n, first] of [['auth.ts', 5, 2], ['security.ts', 0, 1], ['operator-access.ts', 1, 0], ['onboarding.ts', 2, 2] /* ONBOARDNOTG1108: + the wizard close flag */, ['claude-plans-login.ts', 1, 1]] as const) {
       expect([f, count(f, 'mayActAsOwner'), count(f, 'mayActAsOwnerOrFirstRun')]).toEqual([f, n, first])
     }
   })
@@ -223,7 +224,7 @@ describe('which call site asks which predicate (source pin, every route file)', 
     expect(src('operator-access.ts')).toContain('!bridgeOwner(auth, req)')
   })
   it('the agent, channel, plan, provider and connector gates take the owner gate; only agent create, channel setup and a channel\'s first pairing approve take the first-run setup', () => {
-    for (const [f, owner, first] of [['agents.ts', 20, 3], ['connectors.ts', 9, 0], ['claude-plans.ts', 3, 0], ['custom-providers.ts', 1, 0], ['agent-terminal.ts', 3, 0]] as const) {
+    for (const [f, owner, first] of [['agents.ts', 21, 3] /* MAINAUTHSWITCH1107: + the main auth switch */, ['connectors.ts', 10, 0] /* MAINAUTH1107: + agent-*-api-key writes */, ['claude-plans.ts', 3, 0], ['custom-providers.ts', 1, 0], ['agent-terminal.ts', 3, 0]] as const) {
       expect([f, count(f, 'mayActAsOwner'), count(f, 'mayActAsOwnerOrFirstRun')]).toEqual([f, owner, first])
     }
     expect(src('agents.ts')).toContain("firstPairing ? mayActAsOwnerOrFirstRun(ctx.auth, req, 'first-pairing') : mayActAsOwner(ctx.auth, req)")
@@ -286,6 +287,19 @@ describe('on the real routes', () => {
     // a full key that is not a paired Bridge (no install id): the cookie is what lets it in
     expect((await hit(tryHandleClaudePlansLogin, 'GET', '/api/claude-plans/login/status', withCookie)).status).toBe(200)
     expect(refusedByOwnerGate(await hit(tryHandleClaudePlansLogin, 'GET', '/api/claude-plans/login/status', bare))).toBe(true)
+  })
+
+  it('R6b: the setup wizard close (ONBOARDNOTG1108 b): key + cookie writes the machine flag; the key alone is refused', async () => {
+    const key = keyOf()
+    const flag = join(TMP_STORE.dir, '.onboarding-dismissed')
+    expect(refusedByOwnerGate(await hit(tryHandleOnboarding, 'POST', '/api/onboarding/dismiss', { authorization: `Bearer ${key}` }))).toBe(true)
+    expect(existsSync(flag)).toBe(false)
+    expect((await hit(tryHandleOnboarding, 'POST', '/api/onboarding/dismiss', { authorization: `Bearer ${key}`, cookie: cookieHeader() })).status).toBe(200)
+    expect(existsSync(flag)).toBe(true)
+    expect(refusedByOwnerGate(await hit(tryHandleOnboarding, 'DELETE', '/api/onboarding/dismiss', { authorization: `Bearer ${key}` }))).toBe(true)
+    expect(existsSync(flag)).toBe(true)
+    expect((await hit(tryHandleOnboarding, 'DELETE', '/api/onboarding/dismiss', { authorization: `Bearer ${key}`, cookie: cookieHeader() })).status).toBe(200)
+    expect(existsSync(flag)).toBe(false)
   })
 
   // Dani 65912 (1) and (2): revoking a key (for a paired Bridge also its SSH line) is the one route where bridgeOwner

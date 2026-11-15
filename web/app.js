@@ -262,6 +262,24 @@ function mainAgentId() {
 
   window.mvShowLogin = (opts) => showLoginOverlay(opts)
 
+  // ONBOARDOWNERPW1107: the onboarding wizard's own sign-in (its first step). On the unwrapped fetch, like the overlay
+  // above: through the wrapper a wrong password's 401 would wipe the stored token or Bridge key and open the full-screen
+  // login. Returns only the outcome; the caller clears its password fields.
+  window.mvPasswordLogin = async (username, password) => {
+    try {
+      const r = await originalFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      let retryAfter = 0
+      if (r.status === 429) { try { retryAfter = (await r.json()).retry_after_s || 0 } catch { /* ignore */ } }
+      return { ok: r.ok, status: r.status, retryAfter }
+    } catch {
+      return { ok: false, status: 0, retryAfter: 0 }
+    }
+  }
+
   // BRIDGEPWLOGIN1101 (Samu 64763, plan A; the moment: Samu 65968): the Bridge opens the dashboard with its device key,
   // which never makes the owner. Most Bridge use needs no owner session, so nothing is offered on load: the offer comes
   // when an owner action is first refused (403 owner_session_required, maybeOfferOnOwnerRefusal in the fetch wrapper),
@@ -281,6 +299,8 @@ function mainAgentId() {
   }
   async function offerOwnerLoginOnce() {
     try { if (sessionStorage.getItem(LOGIN_LATER_KEY) === '1') return } catch { /* storage blocked: offer it */ }
+    // ONBOARDOWNERPW1107: while the onboarding wizard is open, its first step is the sign-in; no second form over it.
+    if (typeof document !== 'undefined' && document.getElementById('onboardingOverlay')?.classList.contains('active')) return
     if (!sessionToken) return
     let s = null
     try {
@@ -421,8 +441,6 @@ function switchPage(pageId) {
   if (pageId !== 'agents') stopAgentsBusyPoll()
   // Kanban auto-refresh: start on enter, stop on leave.
   if (pageId !== 'kanban') stopKanbanRefresh()
-  // GROMZOOWNERQR1030: the owner QR never outlives the Settings page.
-  if (pageId !== 'settings' && typeof window.clearGromzoQr === 'function') window.clearGromzoQr()
   if (pageId === 'overview') loadOverview()
   if (pageId === 'projects') loadProjects()
   if (pageId === 'kanban') { if (typeof _initGanttViewSwitcher === 'function') _initGanttViewSwitcher(); loadKanban(); startKanbanRefresh() }
@@ -965,8 +983,107 @@ async function loadKanban() {
     populateProjectSuggestions()
     setupAssigneeFilter()
     renderKanban()
+    renderKanbanSummary()
   } catch (err) {
     console.error('Kanban betöltés hiba:', err)
+  }
+}
+
+// Card ed3c8caf (#569): the per-agent board summary strip. Best-effort: a
+// failed fetch leaves the strip hidden, the board itself is unaffected.
+async function renderKanbanSummary() {
+  const box = document.getElementById('kanbanSummary')
+  const body = document.getElementById('kanbanSummaryBody')
+  const totals = document.getElementById('kanbanSummaryTotals')
+  if (!box || !body || !totals) return
+  let data
+  try {
+    const r = await fetch('/api/kanban/summary?hours=24')
+    if (!r.ok) return
+    data = await r.json()
+  } catch { return }
+  const agents = Array.isArray(data?.agents) ? data.agents : []
+  const ownerWaiting = data?.owner_waiting || { count: 0, cards: [] }
+  const closed = agents.reduce((n, a) => n + a.closed.length, 0)
+  const stuck = agents.reduce((n, a) => n + a.stuck.length, 0)
+  box.hidden = closed + stuck + ownerWaiting.count === 0
+  totals.textContent = t('kanban.summary.totals', { closed, stuck, owner: ownerWaiting.count })
+  body.innerHTML = ''
+
+  const cardChip = (ref, extra) => {
+    const chip = document.createElement('button')
+    chip.type = 'button'
+    chip.className = 'kanban-summary-chip'
+    chip.textContent = (ref.seq ? '#' + ref.seq : '') + (extra ? ' ' + extra : '')
+    chip.title = ref.title || ''
+    chip.addEventListener('click', () => {
+      const target = kanbanCards.find((c) => c.id === ref.id)
+      if (target) showCardDetail(target)
+      else showToast(t('kanban.toast.blocker_not_on_board'))
+    })
+    return chip
+  }
+  const line = (label, chips) => {
+    const row = document.createElement('div')
+    row.className = 'kanban-summary-row'
+    const who = document.createElement('span')
+    who.className = 'kanban-summary-who'
+    who.textContent = label
+    row.appendChild(who)
+    for (const c of chips) row.appendChild(c)
+    body.appendChild(row)
+  }
+  const moreMarker = (n) => {
+    const more = document.createElement('span')
+    more.className = 'kanban-summary-more'
+    more.textContent = t('kanban.summary.more', { n })
+    return more
+  }
+  // Per-agent chip cap per kind: a long stuck list (hundreds of chips) would
+  // make the strip several screens tall on a phone. The totals line still
+  // counts everything; the rest is one "+N" marker, like the owner list.
+  const AGENT_CHIP_CAP = 12
+  if (ownerWaiting.count > 0) {
+    const chips = ownerWaiting.cards.map((c) => cardChip(c))
+    if (ownerWaiting.count > ownerWaiting.cards.length) chips.push(moreMarker(ownerWaiting.count - ownerWaiting.cards.length))
+    line(t('kanban.summary.owner'), chips)
+  }
+  for (const a of agents) {
+    const chips = []
+    if (a.closed.length) {
+      const lab = document.createElement('span')
+      lab.className = 'kanban-summary-kind'
+      lab.textContent = t('kanban.summary.closed')
+      chips.push(lab)
+      for (const c of a.closed.slice(0, AGENT_CHIP_CAP)) {
+        const chip = cardChip(c, c.evidence ? '✓' : '')
+        const tip = [c.title]
+        // The row is the assignee; who moved it to done goes in the tooltip.
+        if (c.closed_by && c.closed_by !== a.agent) tip.push(t('kanban.summary.closed_by', { actor: c.closed_by }))
+        if (c.evidence) tip.push(`${t('kanban.summary.evidence')}: ${c.evidence}`)
+        chip.title = tip.join('\n')
+        chips.push(chip)
+      }
+      if (a.closed.length > AGENT_CHIP_CAP) chips.push(moreMarker(a.closed.length - AGENT_CHIP_CAP))
+    }
+    if (a.stuck.length) {
+      const lab = document.createElement('span')
+      lab.className = 'kanban-summary-kind kanban-summary-kind-stuck'
+      lab.textContent = t('kanban.summary.stuck')
+      chips.push(lab)
+      for (const c of a.stuck.slice(0, AGENT_CHIP_CAP)) chips.push(cardChip(c, t('kanban.summary.idle_days', { n: c.idle_days })))
+      if (a.stuck.length > AGENT_CHIP_CAP) chips.push(moreMarker(a.stuck.length - AGENT_CHIP_CAP))
+    }
+    line(a.agent, chips)
+  }
+  try {
+    box.open = localStorage.getItem('marveen.kanbanSummaryOpen') === '1'
+  } catch { /* storage blocked: stays collapsed */ }
+  if (!box.dataset.wired) {
+    box.dataset.wired = '1'
+    box.addEventListener('toggle', () => {
+      try { localStorage.setItem('marveen.kanbanSummaryOpen', box.open ? '1' : '0') } catch { /* ignore */ }
+    })
   }
 }
 
@@ -3773,6 +3890,9 @@ document.getElementById('wizardCreateBtn').addEventListener('click', async () =>
 
 // === Toast ===
 function showToast(msg, duration = 3000) {
+  // Some callers pass a type word ('error') where the duration goes. The delay was then NaN, which setTimeout runs
+  // at once: the toast was gone before it could be seen. Anything but a finite number means the default.
+  if (typeof duration !== 'number' || !Number.isFinite(duration)) duration = 3000
   toast.textContent = msg
   toast.classList.add('visible')
   setTimeout(() => toast.classList.remove('visible'), toastDuration(msg, duration))
@@ -4290,6 +4410,12 @@ function applyMarveenReadonlyMode(readOnly) {
   if (authModeGroup) authModeGroup.hidden = readOnly
   const memoryIsolationGroup = document.getElementById('memoryIsolationGroup')
   if (memoryIsolationGroup) memoryIsolationGroup.hidden = readOnly
+  // MAINAUTHSWITCH1107: the main agent's own authentication switch, on the main agent card only
+  const mainAuthGroup = document.getElementById('mainAuthGroup')
+  if (mainAuthGroup) {
+    mainAuthGroup.hidden = !readOnly
+    if (readOnly) loadMainAuthPanel()
+  }
   const note = document.getElementById('marveenReadonlyNote')
   if (note) note.hidden = !readOnly
 }
@@ -5037,10 +5163,113 @@ function updateProcessControl(agent) {
 // RESTARTFORCEUI1018: the server refuses a manual main restart while the pane is busy or unreadable (409
 // restart-blocked, manual-restart-gate.ts), so a click never cuts a running turn by accident. A stuck main
 // agent can read busy for good, so the refusal is not the end: a second confirm sends an explicit force.
+// MAINAUTHSWITCH1107 (APIKULCSINDITAS1004 D): the main agent's authentication switch. Reads the main agent's detail
+// (authMode, hasApiKey, mainAuthLaunched = what the last launch ran on), saves through the owner-gated PUT, then
+// restarts through the same gated path as the restart button.
+function mainAuthSelected() {
+  return document.querySelector('input[name="mainAuthMode"]:checked')?.value || 'shared'
+}
+function renderMainAuthSections() {
+  const api = mainAuthSelected() === 'api'
+  document.getElementById('mainAuthApiSection').hidden = !api
+}
+function mainAuthRunningText(d) {
+  const l = d && d.mainAuthLaunched
+  if (!l || !l.effective) return t('agents.main_auth.running_unknown')
+  const base = t('agents.main_auth.running_' + l.effective)
+  if (l.configured === 'api' && l.effective !== 'api' && l.conflict) {
+    const reason = t('agents.main_auth.reason_' + String(l.conflict).replace(/-/g, '_'))
+    return t('agents.main_auth.not_honoured').replace('{reason}', reason) + ' ' + base
+  }
+  return base
+}
+async function loadMainAuthPanel() {
+  const group = document.getElementById('mainAuthGroup')
+  if (!group) return
+  document.getElementById('mainAuthError').hidden = true
+  document.getElementById('mainAuthApiKey').value = ''
+  let d = null
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}`)
+    if (res.ok) d = await res.json()
+  } catch { /* shown as unknown */ }
+  const mode = d && d.authMode === 'api' ? 'api' : 'shared'
+  for (const r of document.querySelectorAll('input[name="mainAuthMode"]')) r.checked = r.value === mode
+  const status = document.getElementById('mainAuthKeyStatus')
+  status.textContent = d && d.hasApiKey ? t('agents.main_auth.key_stored') : t('agents.main_auth.key_missing')
+  status.style.color = d && d.hasApiKey ? 'var(--success)' : 'var(--warning)'
+  document.getElementById('mainAuthRunning').textContent = mainAuthRunningText(d)
+  renderMainAuthSections()
+}
+document.querySelectorAll('input[name="mainAuthMode"]').forEach((r) => r.addEventListener('change', renderMainAuthSections))
+
+document.getElementById('mainAuthApplyBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('mainAuthApplyBtn')
+  const errorDiv = document.getElementById('mainAuthError')
+  errorDiv.hidden = true
+  const mode = mainAuthSelected()
+  const payload = { authMode: mode }
+  const key = document.getElementById('mainAuthApiKey').value.trim()
+  if (mode === 'api' && key) payload.apiKey = key
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const reply = await readActionReply(res)
+    if (!reply.ok) {
+      errorDiv.textContent = refusalReason(res, reply.body)
+      errorDiv.hidden = false
+      return
+    }
+    document.getElementById('mainAuthApiKey').value = ''
+    if (reply.body.verified === false) showToast(t('agents.main_auth.unverified'))
+    const restarted = await restartMainAgentGated()
+    showToast(t(restarted ? 'agents.main_auth.saved_restarting' : 'agents.main_auth.saved_not_restarted'))
+    setTimeout(() => { loadMainAuthPanel() }, 20000)
+    loadMainAuthPanel()
+  } catch (err) {
+    errorDiv.textContent = err && err.message ? err.message : String(err)
+    errorDiv.hidden = false
+  } finally {
+    btn.disabled = false
+  }
+})
+
+
+
 function postMarveenRestart(force) {
   return force
     ? fetch('/api/marveen/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: true }) })
     : fetch('/api/marveen/restart', { method: 'POST' })
+}
+
+// The main agent's gated restart: a busy or unreadable pane asks before forcing (the restart button and the
+// MAINAUTHSWITCH1107 switch share it). Resolves true when restarted, false when the owner declined the force;
+// throws on a failed restart.
+async function restartMainAgentGated() {
+  let res = await postMarveenRestart(false)
+  if (res.status === 409) {
+    const blocked = await res.clone().json().catch(() => ({}))
+    if (blocked.error === 'restart-blocked') {
+      const key = blocked.reason === 'busy' ? 'agents.confirm.force_restart_busy' : 'agents.confirm.force_restart_unreadable'
+      const forced = await confirmDialog({
+        title: t('agents.confirm.hard_restart_title'),
+        message: t(key),
+        okLabel: t('agents.confirm.force_restart_ok'),
+        danger: true,
+      })
+      if (!forced) { showToast(t('agents.toast.restart_not_forced')); return false }
+      res = await postMarveenRestart(true)
+    }
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || t('agents.toast.restart_failed'))
+  }
+  return true
 }
 
 document.getElementById('marveenRestartBtn').addEventListener('click', async () => {
@@ -5054,26 +5283,7 @@ document.getElementById('marveenRestartBtn').addEventListener('click', async () 
   const btn = document.getElementById('marveenRestartBtn')
   btn.disabled = true
   try {
-    let res = await postMarveenRestart(false)
-    if (res.status === 409) {
-      const blocked = await res.clone().json().catch(() => ({}))
-      if (blocked.error === 'restart-blocked') {
-        const key = blocked.reason === 'busy' ? 'agents.confirm.force_restart_busy' : 'agents.confirm.force_restart_unreadable'
-        const forced = await confirmDialog({
-          title: t('agents.confirm.hard_restart_title'),
-          message: t(key),
-          okLabel: t('agents.confirm.force_restart_ok'),
-          danger: true,
-        })
-        if (!forced) { showToast(t('agents.toast.restart_not_forced')); return }
-        res = await postMarveenRestart(true)
-      }
-    }
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || t('agents.toast.restart_failed'))
-    }
-    showToast(t('agents.toast.marveen_restarted'))
+    if (await restartMainAgentGated()) showToast(t('agents.toast.marveen_restarted'))
   } catch (err) {
     showToast(`Hiba: ${err.message}`)
   } finally {
@@ -7510,13 +7720,25 @@ function renderPendingRetries(container, rows) {
       const row = e.currentTarget.closest('.pending-retry-row')
       const id = row?.dataset.id
       if (!id) return
-      if (!confirm(t('tasks.confirm.cancel_pending'))) return
+      const r = rows.find(x => String(x.id) === id)
+      const confirmed = await confirmDialog({
+        title: t('tasks.confirm.cancel_pending_title'),
+        // Without an agent name the text drops the parentheses instead of printing an empty pair.
+        message: (r && r.agentName)
+          ? t('tasks.confirm.cancel_pending', { name: r.taskName || id, agent: r.agentName })
+          : t('tasks.confirm.cancel_pending_no_agent', { name: (r && r.taskName) || id }),
+        okLabel: t('tasks.confirm.cancel_pending_ok'),
+        danger: true,
+      })
+      if (!confirmed) return
       try {
         const res = await fetch(`/api/schedules/pending/${encodeURIComponent(id)}`, { method: 'DELETE' })
-        if (!res.ok) throw new Error('cancel failed')
+        // The server's reasons are English API texts ("Pending retry not found"): a translated toast instead,
+        // and the list is reloaded, since a 404 means the retry is already gone.
+        if (!res.ok) showToast(t('tasks.toast.cancel_pending_error'))
         loadPendingRetries()
-      } catch (err) {
-        console.error('Pending retry cancel hiba:', err)
+      } catch {
+        showToast(t('tasks.toast.cancel_pending_error'))
       }
     })
   })
@@ -8277,12 +8499,107 @@ async function saveMemoryFromModal() {
 }
 document.getElementById('saveMemBtn').addEventListener('click', saveMemoryFromModal)
 
+// Card ca046c9a (#570): nothing moves a hot memory down on its own, so hot rows
+// pile up. The stats endpoint counts the ones with no write for staleHotDays;
+// the Hot tab shows that count and lets the viewer list only those.
+let memStaleInfo = { count: 0, days: 7 }
+let memStaleOnly = false
+// Inline preview of a referenced memory under the chip row, toggled per id.
+async function toggleMemRefPreview(item, refId) {
+  const box = item.querySelector('.mem-ref-preview')
+  if (!box) return
+  if (!box.hidden && box.dataset.refId === String(refId)) {
+    box.hidden = true
+    return
+  }
+  box.hidden = false
+  box.dataset.refId = String(refId)
+  box.textContent = t('memories.chain.loading')
+  try {
+    const res = await fetch(`/api/memories/${refId}`)
+    if (!res.ok) throw new Error(String(res.status))
+    const m = await res.json()
+    box.textContent = ''
+    const head = document.createElement('div')
+    head.className = 'mem-ref-preview-head'
+    head.textContent = `#${m.id} · ${tierLabels[m.category] || m.category} · ${m.agent_id || ''}`
+    const body = document.createElement('div')
+    body.className = 'mem-ref-preview-body'
+    body.textContent = m.content
+    box.append(head, body)
+  } catch {
+    box.textContent = t('memories.chain.not_found', { id: refId })
+  }
+}
+
+// #573: when the server began logging real uses (0 = nothing logged yet).
+let memUseSince = 0
+
+// The "used" chip: last real use by an agent (read by id, a top search hit
+// that matched as asked, a partial FELULIRJA reference), or that there is none
+// since logging began. Not the write age and not accessed_at.
+function memUseChip(mem) {
+  const since = memUseSince ? new Date(memUseSince * 1000).toLocaleDateString('hu-HU') : ''
+  if (!mem.last_used_at) {
+    return `<span class="mem-use-badge none" title="${escapeHtml(t('memories.use.none_title', { since: since || '-' }))}">${escapeHtml(t('memories.use.none'))}</span>`
+  }
+  const days = Math.floor((Date.now() / 1000 - Number(mem.last_used_at)) / 86400)
+  const label = days <= 0 ? t('memories.use.today', { count: mem.use_count }) : t('memories.use.days', { days, count: mem.use_count })
+  return `<span class="mem-use-badge" title="${escapeHtml(t('memories.use.title', { since: since || '-' }))}">${escapeHtml(label)}</span>`
+}
+
+function memLastWrite(mem) {
+  return Number(mem.updated_at || mem.created_at || 0)
+}
+
+function renderMemStaleBanner() {
+  const el = document.getElementById('memStaleBanner')
+  if (!el) return
+  const q = memSearchInput.value.trim()
+  if (currentMemTier !== 'hot' || q || (memStaleInfo.count === 0 && !memStaleOnly)) {
+    el.hidden = true
+    el.textContent = ''
+    return
+  }
+  el.hidden = false
+  el.textContent = ''
+  const text = document.createElement('span')
+  text.textContent = t('memories.stale.banner', { count: memStaleInfo.count, days: memStaleInfo.days })
+  const btn = document.createElement('button')
+  btn.className = 'btn-secondary btn-compact'
+  btn.id = 'memStaleToggle'
+  btn.textContent = memStaleOnly ? t('memories.stale.show_all') : t('memories.stale.only_stale')
+  btn.addEventListener('click', () => {
+    memStaleOnly = !memStaleOnly
+    loadMemories()
+  })
+  el.append(text, btn)
+}
+
+async function moveMemTier(mem, tier) {
+  try {
+    const res = await fetch(`/api/memories/${mem.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier, updated_by: 'dashboard' }),
+    })
+    if (!res.ok) throw new Error(String(res.status))
+    showToast(t('memories.stale.moved', { tier: tierLabels[tier] || tier }))
+    loadMemories()
+    loadMemStats()
+  } catch {
+    showToast(t('common.error_save'))
+  }
+}
+
 async function loadMemStats() {
   try {
     const res = await fetch('/api/memories/stats')
     const stats = await res.json()
     const embCount = stats.withEmbedding || 0
     const embPct = stats.total > 0 ? Math.round(embCount / stats.total * 100) : 0
+    memStaleInfo = { count: stats.staleHot || 0, days: stats.staleHotDays || 7 }
+    renderMemStaleBanner()
     memStats.innerHTML = `
       <div class="stat-card"><div class="stat-value">${stats.total}</div><div class="stat-label">${t('memories.stat.total')}</div></div>
       ${Object.entries(stats.byTier || {}).map(([tier, count]) =>
@@ -8320,6 +8637,8 @@ async function loadMemories() {
   }
   if (agent) params.set('agent', agent)
   if (currentMemTier) params.set('tier', currentMemTier)
+  // stale_days is listing-only on the server (400 with q), so a search wins.
+  if (currentMemTier === 'hot' && memStaleOnly && !q) params.set('stale_days', String(memStaleInfo.days))
   params.set('limit', '50')
 
   try {
@@ -8332,6 +8651,8 @@ async function loadMemories() {
     // with res.json() alone threw it away, so a viewer saw fifty rescued rows
     // as fifty hits. The header is only set on a search (q), not on listing.
     renderMemSearchLabel(q ? res.headers.get('X-Memory-Search') : null)
+    memUseSince = Number(res.headers.get('X-Memory-Use-Since')) || 0
+    renderMemStaleBanner()
     renderMemories(memories)
   } catch (err) {
     console.error('Memória betöltés hiba:', err)
@@ -8362,6 +8683,66 @@ function renderMemSearchLabel(header) {
   el.append(strong, body, raw)
 }
 
+// #571: the chain chips of one memory card. Every interpolation is a
+// Number() or an escapeHtml(t(...)), so the HTML is safe by construction.
+function memChainChipsHtml(supersedes, supersededBy) {
+  let html = ''
+  for (const r of supersedes) {
+    const key = r.partial ? 'memories.chain.supersedes_part' : 'memories.chain.supersedes'
+    html += `<button type="button" class="mem-chain-chip${r.partial ? ' partial' : ''}" data-ref-id="${Number(r.id)}">${escapeHtml(t(key, { id: Number(r.id) }))}</button>`
+  }
+  if (supersededBy) {
+    html += `<button type="button" class="mem-chain-chip replaced" data-ref-id="${Number(supersededBy)}">${escapeHtml(t('memories.chain.superseded_by', { id: Number(supersededBy) }))}</button>`
+  }
+  return html
+}
+
+// Card 3ddb2b1d (#572): a short title line instead of the first 120 characters.
+// Measured 2026-10-17 on a copy of the owner store (1377 rows): the first
+// sentence or "HEADER:" segment of the first line is the title; median 58,
+// 90th percentile 87 characters. A leading "FELULIRJA <id>:" is dropped (the
+// chain chip says it). When the first segment is only a date, time or status
+// word ("2026-10-03 16:02", "LEZARVA 2026-09-09 03:3x") the next segment is
+// added, otherwise the title would say nothing.
+const MEM_TITLE_MAX = 90
+// The marker ends at the first '.' or ':' FOLLOWED BY A SPACE, so a time inside
+// it ("FELULIRJA a 20:35-os allapotot.") does not end it early.
+const MEM_TITLE_PREFIX = /^\s*(?:fel[uü]l[ií]rja\b[^\n]{0,40}?[:.](?=\s)\s*|aktu[aá]lis[,:]?\s*)/i
+const MEM_TITLE_SPLIT = /(?<=.{12})(?:[.:;!?](?=\s)| -- | — )/
+const MEM_TITLE_NOISE = /\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}(?::\d{2})?x?|\d{1,2}:\dx|\b(?:BST|GMT|UTC)\b|\b(?:lez[aá]rva|friss[ií]tve|aktu[aá]lis|[aá]llapot|k[eé]sz|nyitott|sz[aá]l)\b|[~()[\],.\-:]/gi
+
+function memTitleParts(content) {
+  const body = String(content || '').replace(MEM_TITLE_PREFIX, '')
+  const nl = body.indexOf('\n')
+  const line = (nl >= 0 ? body.slice(0, nl) : body).trim()
+  const lead = body.length - body.trimStart().length
+  let head = line
+  let consumed = line.length
+  const m = MEM_TITLE_SPLIT.exec(line)
+  if (m) {
+    head = line.slice(0, m.index)
+    consumed = m.index + m[0].length
+    if (head.replace(MEM_TITLE_NOISE, '').replace(/\s+/g, '').length < 10) {
+      const restLine = line.slice(consumed)
+      const m2 = MEM_TITLE_SPLIT.exec(restLine.trimStart())
+      const skip = restLine.length - restLine.trimStart().length
+      const next = m2 ? restLine.trimStart().slice(0, m2.index) : restLine.trimStart()
+      head = `${head}: ${next}`
+      consumed += skip + (m2 ? m2.index + m2[0].length : next.length)
+    }
+  }
+  let title = head.trim().replace(/[.:;]+$/, '')
+  if (title.length > MEM_TITLE_MAX) {
+    const cut = title.slice(0, MEM_TITLE_MAX)
+    const sp = cut.lastIndexOf(' ')
+    title = (sp > MEM_TITLE_MAX * 0.55 ? cut.slice(0, sp) : cut).replace(/[\s,;(-]+$/, '') + '…'
+    // A clipped title has not said all of its segment: the snippet repeats it.
+    consumed = 0
+  }
+  const rest = body.slice(lead + consumed).replace(/^[\s.:;!?—-]+/, '').replace(/\s+/g, ' ').trim()
+  return { title: title || String(content || '').slice(0, MEM_TITLE_MAX), rest }
+}
+
 function renderMemories(memories) {
   memList.innerHTML = ''
   memEmpty.hidden = memories.length > 0
@@ -8373,8 +8754,18 @@ function renderMemories(memories) {
     const tier = mem.tier || mem.category || 'warm'
     const tierBadge = escapeHtml(tierLabels[tier] || tier)
     const badgeClass = 'badge-' + tier
-    const shortContent = mem.content.length > 120 ? mem.content.slice(0, 120) + '...' : mem.content
+    const { title: memTitle, rest: memRest } = memTitleParts(mem.content)
     const agentLabel = mem.agent_id || mainAgentId()
+    const ageDays = Math.floor((Date.now() / 1000 - memLastWrite(mem)) / 86400)
+    const isStaleHot = tier === 'hot' && memLastWrite(mem) > 0 && ageDays >= memStaleInfo.days
+    const supersedes = Array.isArray(mem.chain_refs) ? mem.chain_refs : []
+    const supersededBy = mem.chain_replaced_by || null
+    // Move targets: a stale hot row may go to warm or cold; a fully replaced
+    // row that is not cold yet gets the cold button.
+    const moveTargets = []
+    if (isStaleHot) moveTargets.push('warm', 'cold')
+    else if (supersededBy && tier !== 'cold') moveTargets.push('cold')
+    const chainChips = memChainChipsHtml(supersedes, supersededBy)
 
     // Build keywords HTML
     let keywordsHtml = ''
@@ -8391,11 +8782,16 @@ function renderMemories(memories) {
         <span class="mem-agent-badge">${escapeHtml(agentLabel)}</span>
         <span class="mem-date">${escapeHtml(mem.created_label || '')}</span>
         ${typeof mem.salience === 'number' ? `<span class="mem-salience" title="Relevancia ertek">S: ${mem.salience.toFixed(2)}</span>` : ''}
+        ${memUseChip(mem)}
+        ${isStaleHot ? `<span class="mem-stale-badge" title="${escapeHtml(t('memories.stale.age_title'))}">${escapeHtml(t('memories.stale.age', { days: ageDays }))}</span>` : ''}
       </div>
-      <div class="mem-content-short">${escapeHtml(shortContent)}</div>
+      ${chainChips ? `<div class="mem-chain">${chainChips}</div><div class="mem-ref-preview" hidden></div>` : ''}
+      <div class="mem-title">${escapeHtml(memTitle)}</div>
+      ${memRest ? `<div class="mem-content-short">${escapeHtml(memRest)}</div>` : ''}
       <div class="mem-content-full">${escapeHtml(mem.content)}</div>
       ${keywordsHtml}
       <div class="mem-item-footer">
+        ${moveTargets.map(tg => `<button class="btn-secondary mem-move-btn" data-move-tier="${escapeHtml(tg)}" style="padding:6px 14px; font-size:12px;">${escapeHtml(t(tg === 'warm' ? 'memories.stale.to_warm' : 'memories.stale.to_cold'))}</button>`).join('')}
         <button class="btn-secondary" data-edit-memid="${mem.id}" style="padding:6px 14px; font-size:12px;">${t('common.btn.edit')}</button>
         <button class="btn-danger" data-memid="${mem.id}" style="padding:6px 14px; font-size:12px;">${t('common.btn.delete')}</button>
       </div>
@@ -8403,9 +8799,23 @@ function renderMemories(memories) {
 
     // Toggle expand
     item.addEventListener('click', (e) => {
-      if (e.target.closest('.btn-danger') || e.target.closest('.btn-secondary')) return
+      if (e.target.closest('.btn-danger') || e.target.closest('.btn-secondary') || e.target.closest('.mem-chain') || e.target.closest('.mem-ref-preview')) return
       item.classList.toggle('expanded')
     })
+
+    for (const chip of item.querySelectorAll('[data-ref-id]')) {
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation()
+        toggleMemRefPreview(item, chip.dataset.refId)
+      })
+    }
+
+    for (const b of item.querySelectorAll('[data-move-tier]')) {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation()
+        moveMemTier(mem, b.dataset.moveTier)
+      })
+    }
 
     // Edit
     const editBtn = item.querySelector('[data-edit-memid]')
@@ -14778,7 +15188,12 @@ async function loadUpdates() {
     renderUpdatesVersion(data)
     updateBranchDriftUI(data)
     renderBranchNotice(data)
-    if (data.error) {
+    if (data.deployment === 'docker') {
+      // HOSTINGERDOCKER1107: the image owns the version (no git checkout here): say how to update instead of a failure.
+      summary.className = 'updates-summary'
+      summary.textContent = t('updates.docker_managed')
+      applyBtn.hidden = true
+    } else if (data.error) {
       summary.className = 'updates-summary error'
       summary.innerHTML = `<strong>${t('updates.check_failed')}:</strong> ${escapeHtmlUpdates(data.error)}`
       applyBtn.hidden = true
@@ -14851,6 +15266,8 @@ async function renderCliUpdateOffer(fresh) {
   if (!box) return
   let d
   try { d = await (await fetch('/api/updates/cli' + (fresh ? '?fresh=1' : ''))).json() } catch { box.hidden = true; return }
+  // HOSTINGERDOCKER1107: in the container the claude CLI comes with the image; nothing to install from here.
+  if (d.deployment === 'docker') { box.hidden = true; return }
   const esc = escapeHtmlUpdates
   const lines = []
   lines.push(`<strong>${esc(t('updates.cli.title'))}</strong>`)
@@ -15102,43 +15519,134 @@ function onboardingCurrentStep(s) {
 // Operator can dismiss the wizard (skip/close). A false positive must never
 // lock the dashboard, so the choice persists across reloads; normal UI still
 // covers any real setup that remains.
+// ONBOARDNOTG1108 (b): the close is remembered on the machine too (POST /api/onboarding/dismiss, the status's
+// `dismissed`). localStorage is bound to the origin, and the Bridge opens the dashboard on a new local port on every
+// connect, so a close kept only there was lost on every Bridge open. localStorage stays as the fallback for a caller the
+// server refuses (no owner session yet): that close holds on this origin, as before.
 const ONBOARDING_DISMISS_KEY = 'mvOnboardingDismissed'
+let onboardingDismissedOnServer = false
 function onboardingDismissed() {
+  if (onboardingDismissedOnServer) return true
   try { return localStorage.getItem(ONBOARDING_DISMISS_KEY) === '1' } catch { return false }
+}
+// Best effort: a refusal or a network error leaves the browser-local close in place.
+async function saveOnboardingDismissed(dismissed) {
+  try { await fetch('/api/onboarding/dismiss', { method: dismissed ? 'POST' : 'DELETE' }) } catch { /* offline */ }
 }
 function dismissOnboarding() {
   try { localStorage.setItem(ONBOARDING_DISMISS_KEY, '1') } catch { /* private mode */ }
+  onboardingDismissedOnServer = true
+  saveOnboardingDismissed(true)
   const overlay = document.getElementById('onboardingOverlay')
   if (overlay) { overlay.classList.remove('active'); overlay.hidden = true }
   document.body.style.overflow = ''
+  showSetupResumeBanner()
+}
+// The owner reopens the wizard (the auth banner, the setup-resume banner): both records are cleared.
+function undismissOnboarding() {
+  try { localStorage.removeItem(ONBOARDING_DISMISS_KEY) } catch { /* storage blocked */ }
+  onboardingDismissedOnServer = false
+  saveOnboardingDismissed(false)
+}
+// DOCKERFIXES1109 (2): a closed wizard had only one way back, the auth banner, and that one shows only while no
+// dashboard login exists. Whoever closed the wizard after creating the login (measured on the Docker trial, step 4)
+// had none. This banner shows while the wizard is closed AND the server still says the setup is unfinished; its
+// close hides it for this browser session only, so it cannot become the next dead end.
+const SETUP_RESUME_HIDE_KEY = 'mvSetupResumeHidden'
+async function showSetupResumeBanner(known) {
+  const banner = document.getElementById('setupResumeBanner')
+  if (!banner) return
+  let hidden = false
+  try { hidden = sessionStorage.getItem(SETUP_RESUME_HIDE_KEY) === '1' } catch { /* storage blocked */ }
+  if (hidden || !onboardingDismissed()) { banner.hidden = true; return }
+  // DOCKERFIXES1109 follow-up (Dani's review of #2649, point 2): while the auth banner is actually SHOWN (no login yet),
+  // it is the one way back (its button opens the wizard too), so this one stays out of the way. Only while it is shown:
+  // once the owner closes it, initAuthBanner's dismiss re-runs this check and this banner comes back.
+  const auth = document.getElementById('authSetupBanner')
+  if (auth && !auth.hidden) { banner.hidden = true; return }
+  const s = known || await fetchOnboardingStatus()
+  banner.hidden = !(s && s.needsOnboarding)
+}
+function setupResumeMessage(text) {
+  const msg = document.getElementById('setupResumeMsg')
+  if (!msg) return
+  msg.textContent = text || ''
+  msg.hidden = !text
+}
+function wireSetupResumeBanner() {
+  const banner = document.getElementById('setupResumeBanner')
+  if (!banner) return
+  const go = document.getElementById('setupResumeGoBtn')
+  const close = document.getElementById('setupResumeDismiss')
+  if (close) close.addEventListener('click', () => {
+    try { sessionStorage.setItem(SETUP_RESUME_HIDE_KEY, '1') } catch { /* storage blocked */ }
+    banner.hidden = true
+  })
+  if (go) go.addEventListener('click', async () => {
+    const s = await fetchOnboardingStatus()
+    // DOCKERFIXES1109 follow-up (Dani's review of #2649, point 1): an unreadable status (offline, a 5xx) used to hide
+    // the banner and open nothing, so there was no way back until a reload. The banner now stays, with a message.
+    if (!s) { setupResumeMessage(t('onboarding.resume.status_error')); return }
+    setupResumeMessage('')
+    banner.hidden = true
+    if (!s.needsOnboarding) return
+    undismissOnboarding()
+    renderOnboarding(s, await fetchOnboardingAuth())
+  })
 }
 async function initOnboarding() {
-  if (onboardingDismissed()) return
+  wireSetupResumeBanner()
+  if (onboardingDismissed()) { await showSetupResumeBanner(); return }
   const s = await fetchOnboardingStatus()
-  if (!s || !s.needsOnboarding) return
-  renderOnboarding(s)
+  if (!s) return
+  if (s.dismissed === true) { onboardingDismissedOnServer = true; await showSetupResumeBanner(s); return }
+  if (!s.needsOnboarding) return
+  renderOnboarding(s, await fetchOnboardingAuth())
 }
 async function refreshOnboarding() {
   const s = await fetchOnboardingStatus()
-  if (s) renderOnboarding(s)
+  if (s) renderOnboarding(s, await fetchOnboardingAuth())
+}
+// ONBOARDOWNERPW1107 (owner decision, 11-07): the wizard's FIRST step is the dashboard login, so every later step runs
+// in the owner's session (the Bridge key or the token plus the owner cookie) and never stops on a "go to Settings"
+// text. owner_session is in the status only for a caller that could hold it (the shared token, a FULL device key, a
+// session); false means this window can become the owner by creating or signing in to the login. An operator key or a
+// sub-agent token gets no such field, so no sign-in step it could never complete; an unreadable status skips the step
+// too, and the server's gate decides.
+async function fetchOnboardingAuth() {
+  try {
+    const r = await fetch('/api/auth/status', { cache: 'no-store' })
+    return r.ok ? await r.json() : null
+  } catch {
+    return null
+  }
+}
+function onboardingNeedsLogin(auth) {
+  return !!auth && auth.owner_session === false
+}
+// The bar's step for an onboarding step (onboardingCurrentStep, 1-4): the login is 1, the rest move one along.
+function onboardingDisplayStep(base, auth) {
+  return onboardingNeedsLogin(auth) ? 1 : base + 1
 }
 let onboardingChannelProvider = 'telegram'
 let onboardingAgentId = null
 // The step-3 tab is a static HTML label ("Telegram bot") that renderStaticI18n's generic data-i18n sweep would otherwise reset
 // to the Telegram wording on every language switch, so both call sites re-apply the provider-specific text here.
 function applyOnboardingProviderTab() {
-  const el = document.querySelector('#onboardingSteps .onboarding-step[data-ostep="3"] span:last-child')
+  const el = document.querySelector('#onboardingSteps .onboarding-step[data-ostep="4"] span:last-child')
   if (el) el.textContent = onboardingChannelProvider === 'slack' ? t('onboarding.step2.tab_slack') : t('onboarding.step2.tab')
 }
-function renderOnboarding(s) {
+function renderOnboarding(s, auth) {
   if (onboardingDismissed()) return
   const overlay = document.getElementById('onboardingOverlay')
   if (!overlay) return
   if (s.channelProvider) onboardingChannelProvider = s.channelProvider
   if (s.agentId) onboardingAgentId = s.agentId
   applyOnboardingProviderTab()
-  const step = onboardingCurrentStep(s)
-  if (step === 0) { overlay.classList.remove('active'); overlay.hidden = true; document.body.style.overflow = ''; return }
+  const base = onboardingCurrentStep(s)
+  if (base === 0) { overlay.classList.remove('active'); overlay.hidden = true; document.body.style.overflow = ''; return }
+  const loginStep = onboardingNeedsLogin(auth)
+  const step = onboardingDisplayStep(base, auth)
   overlay.hidden = false
   overlay.classList.add('active')
   document.body.style.overflow = 'hidden'
@@ -15151,20 +15659,121 @@ function renderOnboarding(s) {
   // of step 4 -- say so, or a fresh installer reads step 2's "saved" as "done"
   // and every later "bot token not found" as a failure (BK bootcamp, 07-28).
   const flowNote = document.getElementById('onbFlowNote')
-  if (flowNote) flowNote.textContent = step === 4 ? t('onboarding.flow_note_last') : t('onboarding.flow_note')
+  if (flowNote) flowNote.textContent = step === 5 ? t('onboarding.flow_note_last') : t('onboarding.flow_note')
   const body = document.getElementById('onboardingBody')
-  if (step === 1) body.innerHTML = onbIdentityHtml(s)
-  else if (step === 2) body.innerHTML = onbStep1Html(s)
-  else if (step === 3) body.innerHTML = onbStep2Html(s)
+  if (loginStep) {
+    body.innerHTML = onbLoginHtml(auth)
+    wireOnboardingLogin(auth)
+    return
+  }
+  if (base === 1) body.innerHTML = onbIdentityHtml(s)
+  else if (base === 2) body.innerHTML = onbStep1Html(s)
+  else if (base === 3) body.innerHTML = onbStep2Html(s)
   else body.innerHTML = onbStep3Html(s)
-  wireOnboarding(step)
+  wireOnboarding(base)
   // Step 3, token already on disk, managed-settings.json still missing: the status GET already knows this (no probe/write/restart triggered),
   // so show the sudo command right away instead of waiting for a Save click. Retry just re-polls status -- no token POST, no channel restart.
-  if (step === 3 && s.sudoCommand) showSudoModal(s.sudoCommand, () => refreshOnboarding())
+  if (base === 3 && s.sudoCommand) showSudoModal(s.sudoCommand, () => refreshOnboarding())
 }
 function onbMsg(text, isErr) {
   const el = document.getElementById('onbMsg')
   if (el) { el.textContent = text; el.className = 'onb-msg' + (isErr ? ' err' : ' ok') }
+}
+// ONBOARDOWNERPW1107: the login step, three forms. (a) no login yet: create it, then sign in with it at once;
+// (b) a login exists but this window holds no owner session: sign in; (c) only disabled logins: neither works over HTTP,
+// the machine-local CLI is the way. Own ids (onbLogin*): the Settings auth card has its own create form.
+function onbLoginHtml(auth) {
+  if (auth && auth.setup_required) {
+    return `<p>${escapeHtml(t('onboarding.login.create_desc'))}</p>`
+      + `<label class="form-label-sm">${escapeHtml(t('auth.login.username'))}</label>`
+      + `<input id="onbLoginUser" type="text" class="onb-input" maxlength="64" autocomplete="username" autocapitalize="off" spellcheck="false">`
+      + `<label class="form-label-sm">${escapeHtml(t('auth.card.new_password'))}</label>`
+      + `<input id="onbLoginPass" type="password" class="onb-input" autocomplete="new-password">`
+      + `<label class="form-label-sm">${escapeHtml(t('auth.card.repeat_password'))}</label>`
+      + `<input id="onbLoginPass2" type="password" class="onb-input" autocomplete="new-password">`
+      + `<button class="btn-primary btn-compact" id="onbLoginCreateBtn">${escapeHtml(t('onboarding.login.create_btn'))}</button>`
+      + `<div id="onbMsg" class="onb-msg"></div>`
+  }
+  if (auth && auth.login_available) {
+    return `<p>${escapeHtml(t('onboarding.login.signin_desc'))}</p>`
+      + `<label class="form-label-sm">${escapeHtml(t('auth.login.username'))}</label>`
+      + `<input id="onbLoginUser" type="text" class="onb-input" maxlength="64" autocomplete="username" autocapitalize="off" spellcheck="false">`
+      + `<label class="form-label-sm">${escapeHtml(t('auth.login.password'))}</label>`
+      + `<input id="onbLoginPass" type="password" class="onb-input" autocomplete="current-password">`
+      + `<button class="btn-primary btn-compact" id="onbLoginSignInBtn">${escapeHtml(t('auth.login.submit'))}</button>`
+      + `<div id="onbMsg" class="onb-msg"></div>`
+  }
+  return `<p>${escapeHtml(t('onboarding.login.disabled_only'))}</p><div id="onbMsg" class="onb-msg"></div>`
+}
+// The sign-in after a create, or on its own. On success the page reloads, like the login overlay: the cookie and the
+// stored token or key stay, and the wizard comes back on its next step with the whole page in the owner's session.
+async function onbSignIn(username, password) {
+  const r = await window.mvPasswordLogin(username, password)
+  if (r.ok) { window.location.reload(); return true }
+  if (r.status === 429) onbMsg(t('auth.login.err_throttled') + (r.retryAfter ? ` (${r.retryAfter}s)` : ''), true)
+  else if (r.status === 401) onbMsg(t('auth.login.err_invalid'), true)
+  else onbMsg(t('auth.login.err_network'), true)
+  return false
+}
+function wireOnboardingLogin(auth) {
+  const field = (id) => document.getElementById(id)
+  const clearPasswords = () => { for (const id of ['onbLoginPass', 'onbLoginPass2']) { const el = field(id); if (el) el.value = '' } }
+  const createBtn = field('onbLoginCreateBtn')
+  if (createBtn) createBtn.addEventListener('click', async () => {
+    const username = (field('onbLoginUser').value || '').trim()
+    const p1 = field('onbLoginPass').value || ''
+    const p2 = field('onbLoginPass2').value || ''
+    if (!username || !p1) { onbMsg(t('auth.login.err_empty'), true); return }
+    if (p1 !== p2) { onbMsg(t('auth.card.err_mismatch'), true); return }
+    createBtn.disabled = true; onbMsg(t('onboarding.saving'))
+    try {
+      const r = await fetch('/api/auth/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password: p1 }) })
+      const d = await r.json().catch(() => ({}))
+      if (r.ok) {
+        const signedIn = await onbSignIn(username, p1)
+        clearPasswords()
+        if (!signedIn) {
+          // The login exists, this window is not signed in: the step turns into the sign-in form.
+          await refreshOnboarding()
+          onbMsg(t('onboarding.login.created_signin'), true)
+        }
+        return
+      }
+      clearPasswords()
+      if (r.status === 403 || r.status === 409) {
+        // Another window created the login meanwhile (the server creates only one): sign in with it instead.
+        await refreshOnboarding()
+        onbMsg(t('onboarding.login.taken_signin'), true)
+        return
+      }
+      createBtn.disabled = false
+      onbMsg(d.error || t('auth.card.err_generic'), true)
+    } catch {
+      clearPasswords()
+      createBtn.disabled = false
+      onbMsg(t('auth.login.err_network'), true)
+    }
+  })
+  const signInBtn = field('onbLoginSignInBtn')
+  if (signInBtn) signInBtn.addEventListener('click', async () => {
+    const username = (field('onbLoginUser').value || '').trim()
+    const password = field('onbLoginPass').value || ''
+    if (!username || !password) { onbMsg(t('auth.login.err_empty'), true); return }
+    signInBtn.disabled = true
+    const ok = await onbSignIn(username, password)
+    clearPasswords()
+    if (!ok) signInBtn.disabled = false
+  })
+}
+// ONBOARDOWNERPW1107: an owner refusal inside the wizard. When this window can become the owner, the wizard goes back
+// to its login step (true). Otherwise (an operator key, a sub-agent token, an unreadable status, or a session the gate
+// still refused) the caller shows the server's own reason, and nothing jumps to Settings: ownerSessionText would open
+// the Settings page and hide the wizard, the very stop the owner ruled out.
+async function onbOwnerRefused(d) {
+  if (!d || d.code !== 'owner_session_required') return false
+  if (!onboardingNeedsLogin(await fetchOnboardingAuth())) return false
+  await refreshOnboarding()
+  return true
 }
 function onbIdentityHtml(s) {
   return `<p>${escapeHtml(t('onboarding.identity.desc'))}</p>`
@@ -15237,8 +15846,8 @@ function wireOnboarding(step) {
       try {
         const res = await fetch('/api/onboarding/identity', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentName, ownerName }) })
         const d = await res.json().catch(() => ({}))
-        // OWNERGATE3-1104: an owner-session refusal is shown in the page language (ownerSessionText).
-        if (!res.ok) { idBtn.disabled = false; onbMsg(ownerSessionText(d) || d.error || t('onboarding.error'), true); return }
+        // ONBOARDOWNERPW1107: an owner refusal takes the wizard back to its login step (onbOwnerRefused); otherwise the reason.
+        if (!res.ok) { idBtn.disabled = false; if (await onbOwnerRefused(d)) return; onbMsg(d.error || t('onboarding.error'), true); return }
         // The name is live in the .env now -- repaint the chrome from
         // /api/marveen so the sidebar/title reflect it immediately, and
         // surface the automatic channels restart (same pattern as the
@@ -15262,7 +15871,7 @@ function wireOnboarding(step) {
       try {
         const res = await fetch('/api/onboarding/claude-auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
         const d = await res.json().catch(() => ({}))
-        if (!res.ok) { authBtn.disabled = false; onbMsg(d.code === 'owner_session_required' ? t('onboarding.step1.owner_login_required') : (d.error || t('onboarding.error')), true); return }
+        if (!res.ok) { authBtn.disabled = false; if (await onbOwnerRefused(d)) return; onbMsg(d.code === 'owner_session_required' ? t('onboarding.step1.owner_login_required') : (d.error || t('onboarding.error')), true); return }
         // Fresh-install path: the server restarts the (previously
         // unauthenticated) channels session right after the first auth save --
         // surface that, and on failure show the manual restart step instead of
@@ -15322,8 +15931,8 @@ function wireOnboarding(step) {
           showSudoModal(d.sudoCommand, () => botBtn.click())
           return
         }
-        // OWNERGATE2-1104: an owner refusal is said in the page language (ownerSessionText); setup_required also opens the create-login form.
-        if (!res.ok) { botBtn.disabled = false; onbMsg(ownerSessionText(d) || d.error || t('onboarding.error'), true); return }
+        // ONBOARDOWNERPW1107: an owner refusal takes the wizard back to its login step (onbOwnerRefused); otherwise the reason.
+        if (!res.ok) { botBtn.disabled = false; if (await onbOwnerRefused(d)) return; onbMsg(d.error || t('onboarding.error'), true); return }
         // The server restarts the channels session so the new bot token goes
         // live. Do NOT advance on a timer: the restart response is a dispatch
         // receipt, and the cold start is ~minutes. Wait for the MEASURED
@@ -15393,9 +16002,8 @@ function wireOnboarding(step) {
           try {
             const res = await fetch(`/api/agents/${encodeURIComponent(onboardingAgentId || mainAgentId())}/channels/${onboardingChannelProvider}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: b.dataset.code }) })
             const d = await res.json().catch(() => ({}))
-            // OWNERGATE2-1104: only the channel's FIRST pairing keeps the token before a login exists; a later one is refused
-            // with setup_required, which ownerSessionText says in the page language and answers by opening the create-login form.
-            if (!res.ok) { b.disabled = false; onbMsg(ownerSessionText(d) || d.error || t('onboarding.error'), true); return }
+            // ONBOARDOWNERPW1107: an owner refusal takes the wizard back to its login step (onbOwnerRefused); otherwise the reason.
+            if (!res.ok) { b.disabled = false; if (await onbOwnerRefused(d)) return; onbMsg(d.error || t('onboarding.error'), true); return }
             onbMsg(t('onboarding.step3.approved'))
             setTimeout(refreshOnboarding, 1500)
           } catch (e) { b.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
@@ -15824,7 +16432,7 @@ async function loadBgTasks() {
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
             <span style="font-size:12px;color:var(--text-muted)">${esc(task.started_label)}</span>
-            ${task.status === 'running' ? `<button class="btn btn-sm" onclick="viewBgTask(${jsArg(task.id)})" style="font-size:11px;padding:2px 8px;">${t('bgTasks.output_btn')}</button><button class="btn btn-sm" onclick="cancelBgTask(${jsArg(task.id)})" style="font-size:11px;padding:2px 8px;color:var(--danger)">${t('bgTasks.stop_btn')}</button>` : ''}
+            ${task.status === 'running' ? `<button class="btn btn-sm" onclick="viewBgTask(${jsArg(task.id)})" style="font-size:11px;padding:2px 8px;">${t('bgTasks.output_btn')}</button><button class="btn btn-sm" onclick="cancelBgTask(${jsArg(task.id)}, ${jsArg(task.agent_id)})" style="font-size:11px;padding:2px 8px;color:var(--danger)">${t('bgTasks.stop_btn')}</button>` : ''}
           </div>
         </div>
         <div style="font-size:13px;color:var(--text-primary);margin-bottom:4px;">${esc(task.prompt)}</div>
@@ -15856,14 +16464,21 @@ async function viewBgTask(id) {
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
     document.getElementById('bgModalClose').addEventListener('click', () => modal.remove())
   } catch {
-    showToast('Hiba')
+    showToast(t('bgTasks.load_error'))
   }
 }
 
-async function cancelBgTask(id) {
-  if (!confirm(t('bgTasks.cancel.confirm'))) return
+async function cancelBgTask(id, agent) {
+  // The server kills the task's tmux session; the output so far is kept on the task.
+  const confirmed = await confirmDialog({
+    title: t('bgTasks.cancel.title'),
+    message: agent ? t('bgTasks.cancel.confirm', { id, agent }) : t('bgTasks.cancel.confirm_no_agent', { id }),
+    okLabel: t('bgTasks.cancel.ok'),
+    danger: true,
+  })
+  if (!confirmed) return
   try {
-    const res = await fetch(`/api/background-tasks/${id}`, { method: 'DELETE' })
+    const res = await fetch(`/api/background-tasks/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (res.ok) {
       showToast(t('bgTasks.toast.stopped'))
       loadBgTasks()
@@ -15871,7 +16486,7 @@ async function cancelBgTask(id) {
       showToast(t('bgTasks.toast.stop_error'))
     }
   } catch {
-    showToast('Hiba')
+    showToast(t('bgTasks.toast.stop_error'))
   }
 }
 
@@ -16245,6 +16860,8 @@ async function renderAuthCard() {
   const body = document.getElementById('authCardBody')
   if (!body) return
   const status = await fetchAuthStatus()
+  // ONBOARDFOLLOW1107: the card may have left the page while the status was on its way; a newer render owns it then.
+  if (!body.isConnected) return
   if (!status) { body.innerHTML = `<p class="auth-muted">${t('auth.card.unavailable')}</p>`; return }
   if (status.setup_required) { renderCreateLoginForm(body) }
   else if (status.method === 'session') { renderSessionPanel(body, status) }
@@ -16691,6 +17308,9 @@ async function initAuthBanner() {
   const canCreate = !!status && (status.method === 'token' || (status.method === 'device' && 'owner_session' in status))
   const show = !!status && status.authenticated && canCreate && status.setup_required && !dismissed
   banner.hidden = !show
+  // DOCKERFIXES1109 follow-up: the setup-resume banner stays out of the way while this one is shown; re-check it now
+  // that this one is decided (whichever of the two inits finishes first).
+  if (show) showSetupResumeBanner()
 }
 
 function wireAuthBanner() {
@@ -16701,9 +17321,21 @@ function wireAuthBanner() {
   if (dismiss) dismiss.addEventListener('click', () => {
     try { localStorage.setItem(AUTH_BANNER_DISMISS_KEY, '1') } catch { /* storage blocked */ }
     banner.hidden = true
+    // DOCKERFIXES1109 follow-up: closing this one must not close the last way back to an unfinished setup.
+    showSetupResumeBanner()
   })
   // Land on the Security tab, where the auth card lives now (openCreateLoginSettings, shared with the 403 setup_required path).
-  if (go) go.addEventListener('click', () => { openCreateLoginSettings() })
+  // ONBOARDOWNERPW1107 (Samu 72423): while the onboarding is unfinished, the banner takes the owner back to the wizard,
+  // which opens on its login step (a closed wizard is reopened); otherwise to the Security tab as before.
+  if (go) go.addEventListener('click', async () => {
+    const s = await fetchOnboardingStatus()
+    if (s && s.needsOnboarding) {
+      undismissOnboarding()
+      renderOnboarding(s, await fetchOnboardingAuth())
+      return
+    }
+    openCreateLoginSettings()
+  })
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -16780,10 +17412,16 @@ function wireFleetFreeze() {
   setInterval(pollFleetFreeze, FLEET_FREEZE_POLL_MS)
 }
 
+// ONBOARDFOLLOW1107: Settings can be loaded again while a run still waits for /api/settings (opened twice, a language
+// switch). Only the newest run may touch the panels after its await: an older one clearing #settingsTabPanels would tear
+// out the auth card the newer run moved into the Security panel (the card left the page, and the pending renderAuthCard
+// wrote into a detached body). tests/browser/settings-load-race.spec.ts.
+let settingsLoadGen = 0
 async function loadSettings() {
   const tabNav = document.getElementById('settingsTabNav')
   const tabPanels = document.getElementById('settingsTabPanels')
   if (!tabNav || !tabPanels) return
+  const gen = ++settingsLoadGen
 
   // Park the auth card back outside the panels before wiping them: a previous
   // loadSettings run moved it INTO the Security panel, and clearing
@@ -16807,6 +17445,7 @@ async function loadSettings() {
     const res = await fetch('/api/settings')
     if (!res.ok) throw new Error('fetch failed')
     const { settings, overridesFile } = await res.json()
+    if (gen !== settingsLoadGen) return // a newer run owns the panels now
 
     // ENVRELAXGATE1104 step 2: an unreadable config-overrides.json drops every saved value, a tightening one too.
     const overridesBanner = document.getElementById('settingsOverridesBanner')
@@ -17024,6 +17663,7 @@ async function loadSettings() {
       }
     }
   } catch (err) {
+    if (gen !== settingsLoadGen) return // a stale run's failure must not wipe the newer run's panels either
     tabPanels.innerHTML = `<p style="padding:24px;color:var(--danger)">${t('settings.error')}</p>`
   }
 }
@@ -17496,7 +18136,12 @@ async function resumeClaudePlanLogin() {
 // POST /api/claude-plans/rotate for the main agent (agentId defaults to it
 // server-side). Restarts the main agent's session, hence the confirm.
 async function switchToClaudePlan(plan) {
-  if (!confirm(t('settings.claude_plans.confirm_switch', { label: plan.label }))) return
+  const confirmed = await confirmDialog({
+    title: t('settings.claude_plans.confirm_switch_title'),
+    message: t('settings.claude_plans.confirm_switch', { label: plan.label }),
+    okLabel: t('settings.claude_plans.confirm_switch_ok'),
+  })
+  if (!confirmed) return
   try {
     const res = await fetch('/api/claude-plans/rotate', {
       method: 'POST',
@@ -17516,8 +18161,35 @@ async function switchToClaudePlan(plan) {
   await loadClaudePlansList()
 }
 
-async function deleteClaudePlan(id) {
-  if (!confirm(t('settings.claude_plans.confirm_delete', { id }))) return
+// The agents set to a plan: the rotation's record (the main agent included) and every agent whose own claudePlan
+// field points at it (set in the agent editor, which the rotation does not record). After the delete they all
+// stop using the plan from their next start (resolveAgentConfigDir reports planUnresolved). If the agent list
+// cannot be read, the rotation's record is still named.
+async function claudePlanUsers(planId, rotationUsers = []) {
+  const users = new Set(rotationUsers)
+  try {
+    const res = await fetch('/api/agents')
+    const list = res.ok ? await res.json() : []
+    for (const a of Array.isArray(list) ? list : []) if (a && a.claudePlan === planId && a.name) users.add(a.name)
+  } catch {}
+  return [...users]
+}
+
+async function deleteClaudePlan(plan, rotationUsers = []) {
+  const id = plan.id
+  const users = await claudePlanUsers(id, rotationUsers)
+  let message = t('settings.claude_plans.confirm_delete', { label: plan.label || id })
+  // Only a token-mode plan has a token in the Vault, and the server removes only that one (deleteOwnTokenSecret);
+  // a configDir plan loses nothing there.
+  if (plan.tokenSecretId) message += ' ' + t('settings.claude_plans.confirm_delete_token')
+  if (users.length) message += '\n\n' + t('settings.claude_plans.confirm_delete_used_by', { agents: users.map(n => `"${n}"`).join(', ') })
+  const confirmed = await confirmDialog({
+    title: t('settings.claude_plans.confirm_delete_title'),
+    message,
+    okLabel: t('settings.claude_plans.confirm_delete_ok'),
+    danger: true,
+  })
+  if (!confirmed) return
   // OWNERGATE2-1104: the server may refuse (403 owner_session_required); show why instead of a silent no-op.
   try {
     const res = await fetch(`/api/claude-plans/${encodeURIComponent(id)}`, { method: 'DELETE' })
@@ -17760,7 +18432,9 @@ async function loadClaudePlansList() {
       delBtn.className = 'claude-plan-delete'
       delBtn.title = t('common.btn.delete')
       delBtn.textContent = '×'
-      delBtn.addEventListener('click', () => deleteClaudePlan(plan.id))
+      // The agents the rotation has on this plan; deleteClaudePlan adds the ones set to it in the agent editor.
+      const planUsers = Object.entries(state.activePlanByAgent || {}).filter(([, id]) => id === plan.id).map(([agent]) => agent)
+      delBtn.addEventListener('click', () => deleteClaudePlan(plan, planUsers))
       actions.appendChild(delBtn)
       row.appendChild(actions)
 
@@ -18521,6 +19195,8 @@ const TU_MODEL_PRICING = {
   'claude-sonnet-4-6':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
   'claude-sonnet-4-5':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
   'claude-fable-5':      { in: 10.0,  out: 50.0,  cw: 12.50, cr: 1.00 },
+  // Fable 5.2: official pricing page, read 2026-11-09 (FABLE52SELECTOR1109): $8 in, $40 out, $10 5m cache write, $0.20 cache hit.
+  'claude-fable-5-2':    { in: 8.0,   out: 40.0,  cw: 10.00, cr: 0.20 },
   'claude-mythos-5':     { in: 10.0,  out: 50.0,  cw: 12.50, cr: 1.00 },
   // Haiku 5.5, from the official pricing page (2026-10-08): prompts up to 100k
   // tokens 0.10 / 0.50 (5m cache write 0.125, hit 0.01); prompts over 100k
@@ -19849,7 +20525,7 @@ function openIdeaEdit(id) {
 
 async function saveIdea() {
   const title = document.getElementById('ideaTitleInput').value.trim()
-  if (!title) { showToast(t('common.title') + ' ' + t('common.error'), 'error'); return }
+  if (!title) { document.getElementById('ideaTitleInput').focus(); showToast(t('ideas.form.title_required'), 'error'); return }
   const impactRaw = document.getElementById('ideaImpactInput').value
   const effortRaw = document.getElementById('ideaEffortInput').value
   const body = {
@@ -19861,18 +20537,39 @@ async function saveIdea() {
     impact: impactRaw ? parseInt(impactRaw) : null,
     effort: effortRaw ? parseInt(effortRaw) : null,
   }
-  if (ideaEditId) {
-    await fetch(`/api/ideas/${ideaEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-  } else {
-    await fetch('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, status: 'new' }) })
-  }
+  // A failed save keeps the modal open with what was typed, and says so.
+  try {
+    const res = ideaEditId
+      ? await fetch(`/api/ideas/${encodeURIComponent(ideaEditId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      : await fetch('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, status: 'new' }) })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      showToast(err.error || t('ideas.toast.save_error'), 'error')
+      return
+    }
+  } catch { showToast(t('ideas.toast.save_error'), 'error'); return }
   closeModal(document.getElementById('ideaModalOverlay'))
   loadIdeasPage()
 }
 
 async function deleteIdeaItem(id) {
-  if (!confirm(t('kanban.confirm.delete'))) return
-  await fetch(`/api/ideas/${id}`, { method: 'DELETE' })
+  const idea = ideasAll.find(i => i.id === id) || ideas.find(i => i.id === id)
+  // The server deletes the idea's attachments (and their files) and its comments with it, so say so.
+  const confirmed = await confirmDialog({
+    title: t('ideas.confirm.delete_title'),
+    message: t('ideas.confirm.delete', { title: (idea && idea.title) || id }) + '\n\n' + t('ideas.confirm.delete_children'),
+    okLabel: t('ideas.confirm.delete_ok'),
+    danger: true,
+  })
+  if (!confirmed) return
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      showToast(err.error || t('ideas.toast.delete_error'), 'error')
+      return
+    }
+  } catch { showToast(t('ideas.toast.delete_error'), 'error'); return }
   loadIdeasPage()
 }
 
@@ -19882,7 +20579,9 @@ async function openIdeaDetail(id) {
   const idea = ideas.find(i => i.id === id)
   if (!idea) return
   ideaDetailId = id
-  const statusLabel = STATUS_LABELS[idea.status] || idea.status
+  // STATUS_LABELS holds functions (the language can change): call it, as the list does.
+  const statusLabelFn = STATUS_LABELS[idea.status]
+  const statusLabel = typeof statusLabelFn === 'function' ? statusLabelFn() : (statusLabelFn || idea.status)
   document.getElementById('ideaDetailTitle').textContent = idea.title
   document.getElementById('ideaDetailMeta').textContent = `${idea.category} · ${statusLabel}`
   document.getElementById('ideaDetailDesc').textContent = idea.description || t('ideas.no_description')
@@ -19924,7 +20623,7 @@ async function loadIdeaAttachments(id) {
           <div style="font-size:11px;color:var(--text-muted)">${formatIdeaAttachmentSize(a.size)}${a.has_text ? ` · <span title="${t('ideas.detail.attach.has_text')}" style="color:var(--success)">✓ ${t('ideas.detail.attach.text_marker')}</span>` : ''}</div>
         </div>
         <a class="btn-secondary btn-compact" style="font-size:11px;text-decoration:none" href="/api/ideas/attachments/${encodeURIComponent(a.id)}/download">${t('ideas.detail.attach.download')}</a>
-        <button class="btn-secondary btn-compact" style="font-size:11px;color:var(--danger)" onclick="deleteIdeaAttachmentItem(${jsArg(encodeURIComponent(a.id))})">${t('ideas.detail.attach.delete')}</button>
+        <button class="btn-secondary btn-compact" style="font-size:11px;color:var(--danger)" onclick="deleteIdeaAttachmentItem(${jsArg(encodeURIComponent(a.id))}, ${jsArg(a.filename)})">${t('ideas.detail.attach.delete')}</button>
       </div>`).join('')
   } catch {
     list.innerHTML = `<div style="color:var(--danger);font-size:12px">${t('ideas.detail.attach.load_error')}</div>`
@@ -19963,8 +20662,14 @@ document.getElementById('ideaAttachmentInput')?.addEventListener('change', async
   }
 })
 
-async function deleteIdeaAttachmentItem(encodedId) {
-  if (!confirm(t('ideas.detail.attach.confirm_delete'))) return
+async function deleteIdeaAttachmentItem(encodedId, filename) {
+  const confirmed = await confirmDialog({
+    title: t('ideas.detail.attach.confirm_delete_title'),
+    message: t('ideas.detail.attach.confirm_delete', { name: filename || '' }),
+    okLabel: t('ideas.detail.attach.confirm_delete_ok'),
+    danger: true,
+  })
+  if (!confirmed) return
   try {
     const res = await fetch(`/api/ideas/attachments/${encodedId}`, { method: 'DELETE' })
     if (!res.ok) throw new Error('HTTP ' + res.status)
@@ -21148,47 +21853,14 @@ function gromzoScheduleStatusRefresh(isConnected, reload, setT) {
   return setT(() => { if (isConnected()) reload() }, GROMZO_STATUS_REFRESH_MS)
 }
 
-// === Gromzo card: the owner's QR code (GROMZOOWNERQR1030, MOBILRELOGINDASH1025) ===
-// POST /api/gromzo/owner-qr answers with the app's URI: the registration code while
-// the owner seat is free, afterwards a new phone's login code. The URI carries a live
-// secret, so: it is drawn client-side into #gromzoQr (an SVG of modules, no text,
-// no attribute holding it), shown for at most 2 minutes (or less if the code expires
-// sooner), then wiped; closing the panel and leaving the page wipe it too. Nothing
-// is stored, nothing is copyable, the request is no-store.
+// === Gromzo card: the link status (GROMZOOWNERQR1030; GROMZOBRIDGEWIZARD1107 D5a) ===
+// The phone hookup and a new phone's code are the Marveen Bridge's ("Gromzo bekötése" wizard). The card's own owner
+// QR is gone: dash.sock never hands out the owner's codes (marveen-mxd #89), so it always ended on consent_required.
+// The card keeps the link status line; the agents are setupGromzoAgents below.
 ;(function setupGromzoCard() {
   const card = document.getElementById('gromzoCard')
   if (!card) return
   const statusEl = document.getElementById('gromzoStatus')
-  const btn = document.getElementById('gromzoAddPhoneBtn')
-  const errEl = document.getElementById('gromzoError')
-  const area = document.getElementById('gromzoQrArea')
-  const qrBox = document.getElementById('gromzoQr')
-  const hintEl = document.getElementById('gromzoQrHint')
-  const cdEl = document.getElementById('gromzoCountdown')
-  const closeBtn = document.getElementById('gromzoQrClose')
-  const SHOW_MAX_S = 120
-  let timer = null
-
-  function clearQr(expiredNote) {
-    if (timer) { clearInterval(timer); timer = null }
-    qrBox.replaceChildren()
-    hintEl.textContent = ''
-    cdEl.textContent = ''
-    area.hidden = true
-    btn.disabled = false
-    if (expiredNote) showError(t('gromzo.qr.expired'))
-  }
-
-  function showError(msg) {
-    errEl.textContent = msg
-    errEl.hidden = !msg
-  }
-
-  function errorText(code) {
-    const key = 'gromzo.err.' + code
-    const s = t(key)
-    return s === key ? t('gromzo.err.generic', { code }) : s
-  }
 
   // While a link waits for the owner's confirmation the line is read again, so the card turns to "linked" on its
   // own once the owner confirms (or to "expired" when the 15 minutes run out). Only while the card is on the page.
@@ -21211,81 +21883,6 @@ function gromzoScheduleStatusRefresh(isConnected, reload, setT) {
     }
   }
   window.loadGromzoCard = loadStatus
-
-  async function requestQr() {
-    clearQr(false)
-    showError('')
-    if (typeof qrcode !== 'function') { showError(t('gromzo.qr.lib_error')); return }
-    btn.disabled = true
-    statusEl.textContent = t('gromzo.qr.generating')
-    let data = null
-    try {
-      const r = await fetch('/api/gromzo/owner-qr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-        cache: 'no-store',
-      })
-      if (!r.ok) {
-        let code = 'http_' + r.status
-        let wait = null
-        try {
-          const b = await r.json()
-          code = String(b.code || b.error || code)
-          if (Number.isInteger(b.retry_after) && b.retry_after > 0) wait = b.retry_after
-        } catch { /* keep the HTTP code */ }
-        // GROMZORESETWAIT1031: during the identity reset lock, when the code can be asked again.
-        // owner_session_required: the card's own notice says it, with the login button (no second message).
-        if (code === 'owner_session_required' && typeof window.gromzoOwnerLogin === 'function') window.gromzoOwnerLogin(true)
-        else showError(code === 'identity_reset_in_progress' && wait !== null
-          ? t('gromzo.err.identity_reset_wait', { min: Math.max(1, Math.ceil(wait / 60)) })
-          : errorText(code))
-        btn.disabled = false
-        loadStatus()
-        return
-      }
-      data = await r.json()
-    } catch (e) {
-      showError(t('gromzo.err.generic', { code: 'network' }))
-      btn.disabled = false
-      loadStatus()
-      return
-    }
-    loadStatus()
-    const ttl = Math.max(1, Math.min(SHOW_MAX_S, Number(data && data.expires_in) || SHOW_MAX_S))
-    const hint = t(data && data.kind === 'login' ? 'gromzo.qr.login_hint' : 'gromzo.qr.join_hint')
-    try {
-      const qr = qrcode(0, 'M')
-      qr.addData(String(data && data.uri || ''))
-      qr.make()
-      qrBox.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true })
-    } catch (e) {
-      data = null
-      showError(t('gromzo.err.generic', { code: 'qr' }))
-      btn.disabled = false
-      return
-    }
-    data = null // the URI is in no variable past this point, only in the drawing
-    hintEl.textContent = hint
-    area.hidden = false
-    const until = Date.now() + ttl * 1000
-    const tick = () => {
-      const left = Math.ceil((until - Date.now()) / 1000)
-      if (left <= 0) { clearQr(true); return }
-      cdEl.textContent = t('gromzo.qr.countdown', { sec: left })
-    }
-    tick()
-    timer = setInterval(tick, 1000)
-  }
-
-  btn.addEventListener('click', requestQr)
-  closeBtn.addEventListener('click', () => clearQr(false))
-  // The card is a collapsed <details>: folding it away wipes the code as well.
-  card.addEventListener('toggle', () => { if (!card.open) clearQr(false) })
-  window.addEventListener('pagehide', () => clearQr(false))
-  // A hidden tab wipes it too; leaving the Settings page does (switchPage).
-  document.addEventListener('visibilitychange', () => { if (document.hidden) clearQr(false) })
-  window.clearGromzoQr = () => clearQr(false)
 })()
 
 // === Gromzo card: which agents are on Gromzo (GROMZOAGENTPICK1101) ===

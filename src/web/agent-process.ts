@@ -42,12 +42,13 @@ import { beginRestart, endRestart } from './restart-lock.js'
 import { cancelRestartWake, scheduleRestartWake, type RestartWakeRequest } from './restart-wake.js'
 import { agentDir, listAgentNames, readAgentModel, resolveAgentModelDetailed, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, agentConfigCarriesSenderRoleGate, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentRunAsUser, readAgentMemoryIsolation, readAgentStateObserver, readAgentWorksourceChannel, readAgentCustomProvider, readAgentExtraChannels, readAgentGromzo, readAgentSenderRoleGatePolicy, readFileOr, readJsonObjectForWrite } from './agent-config.js'
 import { buildExtraChannelLaunch, enableExtraPlugins, gromzoTokenFile, mxdAgentSockUsable } from './agent-extra-channels.js'
-import { filterMainGromzoIds } from './main-gromzo-launch.js'
+import { filterMainGromzoIds, mainGromzoPrimaryReady, MAIN_GROMZO_PLUGIN_ID } from './main-gromzo-launch.js'
 import { ensureGromzoMarketplace } from './gromzo-marketplace.js'
 import { probeExtraPluginsInTree, combineLiveness } from './extra-channel-liveness.js'
 import { loadCustomProvider, type CustomProviderDef } from './custom-providers.js'
 import { decideOwnOauthToken, ownOauthTokenExport, ownOauthLaunchVerdict } from './agent-oauth-token-file.js'
 import { inheritedAuthUnset } from './inherited-auth-unset.js'
+import { copyProjectsOnce, currentAuthKeyMode, hostApiKey, isolatedDirReady, stampAllowed } from './auth-key-mode.js'
 import { worksourceRootFor } from './worksource-queue.js'
 import { syncBashSandboxSettings } from './bash-sandbox.js'
 import { resolveAgentConfigDir, readClaudePlans, getClaudePlan } from './claude-plans.js'
@@ -73,7 +74,7 @@ import {
   type TmuxInvocation,
 } from './ssh-tmux.js'
 import { parseTelegramToken } from './telegram.js'
-import { getProvider, getProviderType, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
+import { getProvider, getProviderType, channelStateDir, providerCapabilities, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { CONTINUE_OPT_OUT_REASON, decideContinueFlag, readContinueOptOut, verifyContinueLaunch } from './channel-continue-policy.js'
 import { buildChannelStateFence } from './channel-state-fence.js'
 import { measureClaudeCliVersion } from './claude-cli-version.js'
@@ -129,6 +130,7 @@ import { CHANNEL_PLUGIN_IDS } from './plugin-ids.js'
 import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
 import { exactTmuxTarget, sessionOfTmuxTarget } from '../tmux-target.js'
 import { expandAndValidateConfigDir } from '../config-dir-path.js'
+import { isOpenRouterOneMillionModel } from '../context-guard.js'
 export { CHANNEL_PLUGIN_IDS }
 
 // Pure: compute the enabledPlugins map for a sub-agent so that exactly its own
@@ -617,12 +619,31 @@ export function mainAgentConfigDirIfSeparate(): string | null {
 // enabled there, it would still start as an MCP server, without MXD_AGENT, and exit.
 export function readExtraChannelPluginIds(): string[] {
   try {
-    const env = readEnvFile(['CHANNEL_PLUGINS_EXTRA', 'MAIN_AGENT_ID'])
-    const raw = env['CHANNEL_PLUGINS_EXTRA'] ?? ''
-    return filterMainGromzoIds(env['MAIN_AGENT_ID'] ?? '', raw.split(/\s+/).map(s => s.trim()).filter(Boolean))
+    const env = readEnvFile(['CHANNEL_PLUGINS_EXTRA', 'MAIN_AGENT_ID', 'CHANNEL_PROVIDER'])
+    return mainIsolatedExtraPluginIds(env['CHANNEL_PROVIDER'] || CHANNEL_PROVIDER, env['MAIN_AGENT_ID'] ?? '', env['CHANNEL_PLUGINS_EXTRA'] ?? '')
   } catch {
     return []
   }
+}
+
+/** GROMZOEXTRASREADY1109 (Samu 73946): the ids the isolated MAIN config enables beside its primary, pure for the tests.
+ *  Every id passes filterMainGromzoIds (the gromzo id only with a usable agent.sock and a valid slug), as before. On a
+ *  CHANNEL_PROVIDER=gromzo install the gromzo id ALSO needs the main agent primary-ready (mainGromzoPrimaryReady, the
+ *  same rule as channels.sh and the respawn builder): measured on the QA VPS 11-09, while the install was gromzo
+ *  PENDING this config still enabled the plugin, the pending claude started it without MXD_AGENT (CONNECTION_CLOSED),
+ *  and the next, ready session came up without its Gromzo channel until the dashboard's soft /mcp reconnect ~9 min
+ *  later, racing channels.sh's 600 s never-started guard. On every other provider gromzo is an extra, as before. */
+export function mainIsolatedExtraPluginIds(
+  provider: string,
+  mainAgentId: string,
+  rawExtras: string,
+  opts: { sockPath?: string; primaryReady?: (id: string) => boolean } = {},
+): string[] {
+  const raw = rawExtras.split(/\s+/).map(s => s.trim()).filter(Boolean)
+  const ids = opts.sockPath === undefined ? filterMainGromzoIds(mainAgentId, raw) : filterMainGromzoIds(mainAgentId, raw, opts.sockPath)
+  if (provider !== 'gromzo') return ids
+  const ready = opts.primaryReady ?? ((id: string) => mainGromzoPrimaryReady(id))
+  return ids.filter((id) => id !== MAIN_GROMZO_PLUGIN_ID || ready(mainAgentId))
 }
 
 /**
@@ -1151,8 +1172,11 @@ function provisionIsolatedConfigDir(
       if (ISOLATED_CONFIG_SKIP.has(entry) || (perUserAgent && entry === '.claude.json')) {
         // Defensively drop a real .credentials.json that an older build may have
         // symlinked/copied here, so the env-var token is the only auth source.
+        // An own_team agent is the exception: its .credentials.json IS its own
+        // /login credential, written here by `claude auth login`, and deleting it
+        // on every spawn logs the agent out (OWNTEAMCREDWIPE1008).
         const stale = join(cfg, entry)
-        if (entry === '.credentials.json') {
+        if (entry === '.credentials.json' && readAgentAuthMode(name) !== 'own_team') {
           try { rmSync(stale, { force: true }) } catch { /* absent */ }
         }
         continue
@@ -1720,10 +1744,15 @@ export function stampFableOverageConsentSharedRoots(): void {
   }
 }
 
-export function resolveAgentProvider(name: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(name)
+/** The provider a sub-agent's own agent-config value resolves to: one of the five sub-agent providers, else the
+ *  install's provider (an unknown or unaccepted value, 'gromzo' included, falls back). Pure, so it is unit-tested. */
+export function pickAgentProvider(perAgent: string | null, installProvider: ChannelProviderType): ChannelProviderType {
   if (perAgent === 'slack' || perAgent === 'telegram' || perAgent === 'discord' || perAgent === 'googlechat' || perAgent === 'teams') return perAgent
-  return CHANNEL_PROVIDER
+  return installProvider
+}
+
+export function resolveAgentProvider(name: string): ChannelProviderType {
+  return pickAgentProvider(readAgentChannelProvider(name), CHANNEL_PROVIDER)
 }
 
 export function agentSessionName(name: string): string {
@@ -1834,7 +1863,9 @@ export function resolveProviderEnv(
     const keyRef = secretShellRef('openrouter-fleet-key') ?? '""'
     return {
       provider: 'openrouter',
-      exportsStr: `export ANTHROPIC_AUTH_TOKEN=${keyRef} && export ANTHROPIC_BASE_URL=https://openrouter.ai/api && export ANTHROPIC_MODEL=${shSingleQuote(model)} && `,
+      // A 1M OpenRouter model needs the CLI told the real window (it caps unknown
+      // ids at 200k); context-guard.ts reads the same predicate, the two are a pair.
+      exportsStr: `export ANTHROPIC_AUTH_TOKEN=${keyRef} && export ANTHROPIC_BASE_URL=https://openrouter.ai/api && export ANTHROPIC_MODEL=${shSingleQuote(model)} && ${isOpenRouterOneMillionModel(model) ? 'export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000 && ' : ''}`,
     }
   }
   if (isOllama) {
@@ -2071,8 +2102,18 @@ export function getAgentRunningSince(name: string, session: string = agentSessio
 }
 
 
+/** GROMZONOPROVIDER1108 (Dani 73584, 73593): decided on the RESOLVED provider, never on what the agent wrote. A
+ *  sub-agent never takes a provider whose capabilities say sub-agents get none (subAgentDefault === 'none': gromzo,
+ *  the MAIN agent's Gromzo channel, which a sub-agent must never carry or speak through). An own value the resolver
+ *  does not accept ('gromzo', 'whatsapp', any string the agent wrote into its own config) falls back to the install's
+ *  provider and lands here as that provider, so it cannot open the door. Pure, so it is unit-tested. */
+export function subAgentMayUseProvider(resolved: ChannelProviderType): boolean {
+  return providerCapabilities(resolved).subAgentDefault !== 'none'
+}
+
 export function agentHasChannel(name: string): boolean {
   const agentProvider = resolveAgentProvider(name)
+  if (!subAgentMayUseProvider(agentProvider)) return false
   const dir = agentDir(name)
   const agentChannelDir = channelStateDir(agentProvider, dir)
   const token = readChannelToken(agentProvider, join(agentChannelDir, '.env'))
@@ -2274,7 +2315,10 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
   const agentProvider = resolveAgentProvider(name)
   const provider = getProvider(agentProvider)
   const agentChannelDir = channelStateDir(agentProvider, dir)
-  const token = readChannelToken(agentProvider, join(agentChannelDir, '.env'))
+  // GROMZONOPROVIDER1108 (Dani 73593): the launch path has its own guard, the same one agentHasChannel asks first, so a
+  // sub-agent never launches with a provider sub-agents may not use (gromzo), whatever a token reader would return.
+  const providerAllowed = subAgentMayUseProvider(agentProvider)
+  const token = providerAllowed ? readChannelToken(agentProvider, join(agentChannelDir, '.env')) : null
   // Backward compat: try legacy Telegram token if provider-aware lookup misses
   let hasChannel = !!token
   if (!token && agentProvider === 'telegram') {
@@ -2452,8 +2496,19 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // convention `agent-{name}-api-key`. We inject it as an env var so Claude
     // Code picks it up without needing OAuth credentials at all.
     let apiKeyEnv = ''
+    // APIKEYSCOPE1107: the key an authMode=api agent runs on, stamped below once its config dir is known.
+    let apiKeyForApproval = ''
+    const keyMode = currentAuthKeyMode(join(PROJECT_ROOT, '.env'), FLEET_OAUTH_TOKEN_PATH)
     if (isClaude && authMode === 'api') {
-      const agentApiKey = getSecret(`agent-${name}-api-key`) ?? ''
+      // Its own vault key, else the host key from .env, EXPLICITLY: it no longer arrives through the tmux global env
+      // on a subscription install (APIKEYSCOPE1107). Under the same launch-secret name, so clearLaunchSecrets cleans
+      // it. Neither -> the launch is refused: it would come up "Not logged in" or on a credential nobody chose.
+      const agentApiKey = getSecret(`agent-${name}-api-key`) || hostApiKey(join(PROJECT_ROOT, '.env'))
+      if (!agentApiKey) {
+        logger.error({ name }, 'authMode=api: no key (no vault agent-<name>-api-key and no ANTHROPIC_API_KEY in .env) -- agent NOT started')
+        return { ok: false, error: 'authMode=api: no API key (vault agent-<name>-api-key or .env ANTHROPIC_API_KEY)' }
+      }
+      apiKeyForApproval = agentApiKey.trim()
       if (agentApiKey) {
         // Ugyanaz a szabaly, mint a provider-againal: a kulcs FAJLBOL olvasva kerul be, hogy a
         // launch-parancs (es vele a `ps` sora) ne hordozza az erteket (LATENSKULCSARGV920).
@@ -2840,6 +2895,22 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // 2fb86ef2: a Claude agent with its own token must run isolated. On the
     // shared ~/.claude the rotating host credential wins over the env token, so
     // the agent would silently authenticate as the host, not with its own token.
+    // APIKEYSCOPE1107: an authMode=api agent that would run on the shared ~/.claude of a subscription install gets its
+    // own config dir: its key's approval stamp must never land in the shared ~/.claude.json (the main agent and the
+    // operator's own CLI read it and would switch to billing the key). Its project dir (memory, transcripts) is
+    // copied over once, modes kept; the dir must be past onboarding. Any step failing refuses the launch, loudly:
+    // a half-provisioned dir is not a success (Samu 72235).
+    if (isClaude && authMode === 'api' && !claudeConfigDir && keyMode !== 'keyonly' && name !== MAIN_AGENT_ID) {
+      const isolated = ensureIsolatedChannelConfigDir(name, hasChannel ? agentProvider : null, extraLaunch.pluginIds)
+      const copied = isolated
+        ? copyProjectsOnce(join(homedir(), '.claude', 'projects'), join(isolated, 'projects'), encodeClaudeProjectDir(dir))
+        : false
+      if (!isolated || !copied || !isolatedDirReady(isolated)) {
+        logger.error({ name, isolated, copied }, 'authMode=api: isolated config dir could not be provisioned (dir, project copy or onboarding state) -- agent NOT started; the shared ~/.claude.json must not carry its key approval')
+        return { ok: false, error: 'authMode=api: isolated config dir could not be provisioned' }
+      }
+      claudeConfigDir = isolated
+    }
     if (ownTokenFile && isClaude && !claudeConfigDir) {
       logger.error(
         { name, path: ownTokenFile },
@@ -2887,6 +2958,29 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
         claudeConfigDir ? join(claudeConfigDir, '.claude.json') : join(homedir(), '.claude.json'),
         customApiKeyForApproval,
       )
+    }
+    // APIKEYSCOPE1107: the API key's approval stamp, so the "Detected a custom API key" prompt (default No) never
+    // stops the pane: an authMode=api agent's key, or on a key-only install the host key for a fleet agent. Into the
+    // agent's own .claude.json; the shared ~/.claude.json only on a key-only install (stampAllowed). Anything else is
+    // a refused launch, never a silent stamp in the shared file.
+    // A key-only fleet agent that keeps the key (no own login: see inheritedAuthUnset) gets the host key EXPLICITLY,
+    // the very value stamped, not whatever the tmux global env carried since channels.sh last started (a rotated key
+    // would otherwise meet a stamp for the new one and stop at the prompt). By reference, never in argv.
+    let stampKey = apiKeyForApproval
+    if (!stampKey && keyMode === 'keyonly' && needsFleetOauth && !configuredConfigDir && !ownTokenFile) {
+      const hostKey = hostApiKey(join(PROJECT_ROOT, '.env')).trim()
+      if (hostKey) {
+        apiKeyEnv = `export ANTHROPIC_API_KEY=${launchSecretRef(`agent-${name}-api-key`, hostKey)} && `
+        stampKey = hostKey
+      }
+    }
+    if (stampKey) {
+      const target = claudeConfigDir ? join(claudeConfigDir, '.claude.json') : join(homedir(), '.claude.json')
+      if (!stampAllowed(target, keyMode)) {
+        logger.error({ name, keyMode }, 'API key approval would land in the shared ~/.claude.json on a subscription install -- agent NOT started')
+        return { ok: false, error: 'API key approval refused for the shared ~/.claude.json' }
+      }
+      stampCustomApiKeyApproval(target, stampKey)
     }
     const claudeConfigEnv = claudeConfigDir ? `export CLAUDE_CONFIG_DIR="${claudeConfigDir}" && ` : ''
     // VOICETOKENLEAK1101 PR-A0: scripts/marveen-api.sh reads the agent's OWN token when it has one (AGENT_TOKENS).
@@ -2952,15 +3046,17 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // BYO/custom-endpoint agents must have CLAUDE_CODE_OAUTH_TOKEN removed from
     // their environment, not just omitted from the launch export. The parent tmux
     // server carries the fleet OAuth token in its own env, and
-    // every new pane inherits it. The Claude CLI prefers CLAUDE_CODE_OAUTH_TOKEN
-    // over ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, so the inherited token would
-    // reach the custom endpoint -> 401, even after the explicit export was removed.
+    // every new pane inherits it. Two credentials on one launch is ambiguous and a
+    // custom endpoint got the fleet token -> 401 (2026-08-05). (The precedence is the
+    // docs' one: ANTHROPIC_API_KEY outranks CLAUDE_CODE_OAUTH_TOKEN, measured
+    // 2026-11-07 on CLI 2.1.319, APIKEYSCOPE1107; the old "the CLI prefers the token"
+    // here was wrong.) So exactly one credential goes in.
     // An active `unset` at launch strips the inherited value before exec.
     // Fleet Claude-OAuth agents keep the token intact. An agent with its own
     // credential (own_team, a configured config dir, its own token file) also
     // drops an inherited ANTHROPIC_API_KEY, which outranks every OAuth path
     // (BYOSUBUNSET1018, inherited-auth-unset.ts).
-    const byoUnsetEnv = inheritedAuthUnset({ needsFleetOauth, isOwnTeam, configuredConfigDir, ownTokenFile: ownTokenFile !== null })
+    const byoUnsetEnv = inheritedAuthUnset({ needsFleetOauth, isOwnTeam, configuredConfigDir, ownTokenFile: ownTokenFile !== null, keyMode })
     // Slack plugin is third-party; its "not on approved allowlist" check is
     // bypassed via `allowedChannelPlugins` in /Library/Application Support/ClaudeCode/managed-settings.json.
     const auditLogEnv = agentProvider === 'slack' ? ` && export SLACK_AUDIT_LOG="${agentChannelDir}/audit.jsonl"` : ''

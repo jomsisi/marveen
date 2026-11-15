@@ -19,6 +19,15 @@ import { sanitizeCapabilityTag, CAPABILITY_TAG_MAX_PER_AGENT } from '../prompt-s
 import { TMP_ROOT_PREFIXES as _TMP_PREFIXES } from './tmp-root-prefixes.js'
 import { shellWord } from './sanitize.js'
 import { agentTokensEnabled, dashboardTokenPathFor, ensureAgentToken, mainTokenPath } from './agent-tokens.js'
+import { agentTextLang, type AgentTextLang } from './agent-text-lang.js'
+import { seedSourceFor } from './seed-lang.js'
+import {
+  type ScaffoldFrags, type RosterText, ROSTER_TEXT_EN, buildMcpListChannelBodyEn, buildAutonomyBodyEn, buildEvidenceBodyEn, buildMessageCloseBodyEn,
+  buildBackgroundCheckpointBodyEn, buildSkillsPathTrapBodyEn, buildSystemDirectiveAuthBodyEn, buildAgentIdHeaderBodyEn,
+  buildMemorySearchLabelBodyEn, buildFleetAuthBodyEn, buildStrictApiBodyEn, buildApiHelperBodyEn,
+  type PromptRecipes, strictPromptRecipesEn, SKILL_SECTION_HEADING_EN, buildSkillSectionEn, buildClaudeMdPromptEn,
+  buildSoulPromptEn, buildSkillPromptEn, PRECOMPACT_PROMPT_EN_TPL,
+} from './agent-scaffold-en.js'
 import { EXTRA_HOOKS_FILE, applyExtraHookEntries, extraHooksDigest, loadExtraHookEntries, type ExtraHookDeps } from './extra-hook-entries.js'
 
 // Resolve the base URL agents should use to reach the dashboard API.
@@ -104,6 +113,18 @@ export function apiPayloadPath(name: string, kind: ApiPayloadKind): string {
 // Dani 65157/1, Samu 65160: one fixed file per kind means two texts prepared in one round would both send the second.
 // The helper empties the file after a successful send and stops on an empty one (scripts/lib/marveen_api.py).
 export const ONE_FILE_ONE_SEND = 'Egy fájl, egy küldés: írd, küldd, és csak utána a következőt; kettőt párhuzamosan ne készíts elő (ugyanaz a fájl, a második felülírná az elsőt). A segéd sikeres küldés után kiüríti a fájlt, és üres fájlra hibával megáll: régi szöveget nem küld.'
+
+// PERSONAESC1107: the values the English bodies (agent-scaffold-en.ts) embed, the same ones the Hungarian recipes use.
+export function scaffoldFrags(name: string): ScaffoldFrags {
+  const tokenPath = dashboardTokenPathFor(name)
+  return {
+    apiHelper, dashboardOrigin, mainAgentId: MAIN_AGENT_ID, botName: BOT_NAME, tokenPath,
+    ownToken: tokenPath !== mainTokenPath(),
+    payload: (kind) => shellWord(apiPayloadPath(name, kind)),
+    ledgerScript: join(PROJECT_ROOT, 'scripts', 'recipient-ledger.mjs'),
+    scriptsDir, autonomyConfig: autonomyConfigPath,
+  }
+}
 
 // The verbs the generated sections run; a deny rule that hits any of them keeps the agent on the old recipes.
 const HELPER_SECTION_VERBS = ['message', 'message-close', 'directive-verify', 'memory-search', 'memory-save', 'memory-update',
@@ -347,6 +368,30 @@ export function substituteTemplatePlaceholders(content: string, id: TemplateIden
     .replaceAll('{{WEB_PORT}}', String(id.webPort))
     // ISSUE1895 (#1895): the install zone, not a hardcoded Europe/Budapest.
     .replaceAll('{{TIMEZONE}}', id.timeZone ?? APP_TZ)
+}
+
+// PERSONAESC1107: on an English install the settings template's PreCompact agent prompt is the English one. Applied to
+// the RAW template (placeholders still in), before resolveTemplatePlaceholders. Without the key the text is returned as
+// it is, byte for byte. Who gets it: a new agent (seeded from the template), and an agent whose settings have no
+// PreCompact agent hook yet (the merge adds the missing event). An agent that already has one keeps it: the merge
+// never adds a second agent hook, and the stock-prompt upgrade is per language (retiredHookPromptsFor), so on an
+// English install only a retired ENGLISH prompt is upgraded, never a Hungarian one. A hand opt-in therefore leaves the
+// existing agents' prompts Hungarian (a documented limit), and a later English wording reaches the English agents
+// through the "en:PreCompact" key of templates/retired-hook-prompts.json.
+export function localizeSettingsTemplate(raw: string): string {
+  if (agentTextLang() !== 'en') return raw
+  try {
+    const tpl = JSON.parse(raw) as { hooks?: Record<string, Array<{ hooks?: Array<{ type?: string; prompt?: unknown }> }>> }
+    let swapped = false
+    for (const group of tpl.hooks?.PreCompact ?? []) {
+      for (const h of group.hooks ?? []) {
+        if (h.type === 'agent' && typeof h.prompt === 'string') { h.prompt = PRECOMPACT_PROMPT_EN_TPL; swapped = true }
+      }
+    }
+    return swapped ? JSON.stringify(tpl, null, 2) + '\n' : raw
+  } catch {
+    return raw
+  }
 }
 
 export function resolveTemplatePlaceholders(content: string): string {
@@ -895,6 +940,18 @@ export function upgradeRetiredHookPrompts(
 // The retired stock prompts, resolved like the template. A missing file means no
 // migration; an unreadable one is logged and also means no migration. The path is
 // a test seam only.
+// PERSONAESC1107 (EGM review): the retired stock prompts of the install's language. The file's plain event keys
+// ("PreCompact") are the Hungarian prompts; an "en:"-prefixed key ("en:PreCompact") holds the English ones. Never
+// cross-language: an English install upgrades only a retired English prompt, a Hungarian install only a Hungarian one.
+export function retiredHookPromptsFor(all: Record<string, string[]>, lang: 'hu' | 'en'): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const [key, list] of Object.entries(all)) {
+    if (lang === 'en' && key.startsWith('en:')) out[key.slice(3)] = list
+    else if (lang === 'hu' && !key.includes(':')) out[key] = list
+  }
+  return out
+}
+
 export function readRetiredHookPrompts(
   p: string = join(PROJECT_ROOT, 'templates', 'retired-hook-prompts.json'),
 ): Record<string, string[]> {
@@ -932,7 +989,7 @@ export function ensureAgentHooks(
   if (!existsSync(tplPath)) return false
   let tpl: Record<string, unknown>
   try {
-    const raw = resolveTemplatePlaceholders(readFileSync(tplPath, 'utf-8'))
+    const raw = resolveTemplatePlaceholders(localizeSettingsTemplate(readFileSync(tplPath, 'utf-8')))
     tpl = JSON.parse(raw)
   } catch {
     return false
@@ -978,7 +1035,7 @@ export function ensureAgentHooks(
     // #2200: an agent still on a stock prompt from an earlier template gets the
     // current one; an edited prompt stays. Before the header pass, so a stock
     // prompt is compared as it shipped.
-    const retiredPrompts = readRetiredHookPrompts()
+    const retiredPrompts = retiredHookPromptsFor(readRetiredHookPrompts(), agentTextLang())
     if (upgradeRetiredHookPrompts(existingHooks, tplHooks, retiredPrompts)) changed = true
     // The add pass's blind spot also hides the task-state curl's X-Agent-Id header.
     if (upgradeTaskStateHeaderInHookPrompts(existingHooks)) changed = true
@@ -3241,7 +3298,12 @@ function copyTaskConfigWithAgentRewrite(srcPath: string, destPath: string): void
   }
 }
 
-export function ensureDefaultScheduledTasks(): void {
+/**
+ * Seeds the repo's top-level scheduled tasks into ~/.claude. `lang` (PERSONAESC1107 seed A): the install's agent-text
+ * language, read only; on en a Markdown file comes from i18n/en/<its repo path> when that exists (src/web/seed-lang.ts,
+ * the same rule as the shell seeders). A parameter so a test does not depend on the checkout's .env and CLAUDE.md.
+ */
+export function ensureDefaultScheduledTasks(lang: AgentTextLang = agentTextLang()): void {
   const repoTasks = join(PROJECT_ROOT, 'scheduled-tasks')
   if (!existsSync(repoTasks)) return
   const destRoot = join(homedir(), '.claude', 'scheduled-tasks')
@@ -3272,10 +3334,11 @@ export function ensureDefaultScheduledTasks(): void {
         // Substitute the identity placeholders (same set the install scripts
         // sed) so a template's SKILL.md never seeds a foreign absolute path or
         // name into the user's task. Binary/unreadable -> fall back to a copy.
+        const readFrom = seedSourceFor(PROJECT_ROOT, join('scheduled-tasks', taskName, file), lang)
         try {
-          writeFileSync(destFile, resolveTemplatePlaceholders(readFileSync(srcFile, 'utf-8')))
+          writeFileSync(destFile, resolveTemplatePlaceholders(readFileSync(readFrom, 'utf-8')))
         } catch {
-          copyFileSync(srcFile, destFile)
+          copyFileSync(readFrom, destFile)
         }
       }
     }
@@ -3366,7 +3429,7 @@ export function scaffoldAgentDir(name: string) {
   if (!existsSync(settingsJson)) {
     const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
     if (existsSync(tplPath)) {
-      const resolved = resolveTemplatePlaceholders(readFileSync(tplPath, 'utf-8'))
+      const resolved = resolveTemplatePlaceholders(localizeSettingsTemplate(readFileSync(tplPath, 'utf-8')))
       atomicWriteFileSync(settingsJson, seedSettingsFromTemplate(resolved, ytDlpIngestOnly()))
     }
   }
@@ -3429,7 +3492,8 @@ const MCPLIST_BLOCK_RE = new RegExp(
  * message is lost. That was reported by the external submitter; we reproduced
  * the tool/plugin side only.
  */
-function buildMcpListChannelBody(): string {
+export function buildMcpListChannelBody(): string {
+  if (agentTextLang() === 'en') return buildMcpListChannelBodyEn()
   return [
     '## `claude mcp list` és gyerek-`claude` egy csatornát birtokló ügynökben',
     '',
@@ -3475,7 +3539,25 @@ const EVIDENCE_BLOCK_RE = new RegExp(
 // - listAgentNames() reads the agents/ directory; the main agent has no
 //   subdirectory there (it lives in the project root). Without explicit
 //   prepending, the main agent would be absent from every peer's roster.
-function buildFleetRosterBody(selfName: string): string {
+// PERSONAESC1107: the roster's words; the English set is ROSTER_TEXT_EN (agent-scaffold-en.ts).
+const ROSTER_TEXT_HU: RosterText = {
+  heading: '## A flotta többi agense',
+  intro: [
+    'Ez a lista automatikusan generálódik az ágens indulásakor, ez a mérvadó és naprakész forrás.',
+    'Ha a fenti szövegben régebbi, kézzel írt felsorolás szerepel, ezt a szekciót vedd figyelembe.',
+  ],
+  subordinateTag: ' (beosztottad)',
+  leadTag: ' (vezetőd)',
+  delegateTag: ' (delegálhatsz neki)',
+  none: '(nincs regisztrált ágens)',
+  lead: (n) => `Vezetőd: **${n}**.`,
+  subordinates: (list) => `Beosztottjaid: ${list}.`,
+  delegates: (list) => `Kiknek delegálhatsz: ${list}.`,
+  outro: 'Ha egy kérés egyértelműen más szakterületére esik, jelezd vagy delegáld inter-agent üzenettel a megfelelő ágensnek.',
+}
+
+export function buildFleetRosterBody(selfName: string): string {
+  const T = agentTextLang() === 'en' ? ROSTER_TEXT_EN : ROSTER_TEXT_HU
   let agentNames: string[]
   try {
     agentNames = listAgentNames()
@@ -3555,18 +3637,18 @@ function buildFleetRosterBody(selfName: string): string {
     // ALSO this agent's own (validated) manager.
     if (peerReportsTo === selfName && agentName !== selfReportsTo) {
       subordinates.push(agentName)
-      roleTag = ' (beosztottad)'
+      roleTag = T.subordinateTag
     } else if (agentName === selfReportsTo) {
-      roleTag = ' (vezetőd)'
+      roleTag = T.leadTag
     } else if (selfDelegates.has(agentName)) {
-      roleTag = ' (delegálhatsz neki)'
+      roleTag = T.delegateTag
     }
     if (selfDelegates.has(agentName)) delegates.push(agentName)
 
     lines.push(`- **${agentName}** (agent_id: ${agentName})${roleTag}: ${capsStr}`)
   }
 
-  const roster = lines.length > 0 ? lines.join('\n') : '(nincs regisztrált ágens)'
+  const roster = lines.length > 0 ? lines.join('\n') : T.none
 
   // Factual only (2026-10-23, reviewer-measured): the line used to also
   // prescribe ROUTING ("a kész munkát neki adod át, nem közvetlenül a
@@ -3576,25 +3658,24 @@ function buildFleetRosterBody(selfName: string): string {
   // agent's own text, not in this generated, one-size-fits-all block.
   const hierarchyLines: string[] = []
   if (selfReportsTo) {
-    hierarchyLines.push(`Vezetőd: **${selfReportsTo}**.`)
+    hierarchyLines.push(T.lead(selfReportsTo))
   }
   if (subordinates.length > 0) {
-    hierarchyLines.push(`Beosztottjaid: ${subordinates.map((n) => `**${n}**`).join(', ')}.`)
+    hierarchyLines.push(T.subordinates(subordinates.map((n) => `**${n}**`).join(', ')))
   }
   if (delegates.length > 0) {
-    hierarchyLines.push(`Kiknek delegálhatsz: ${delegates.map((n) => `**${n}**`).join(', ')}.`)
+    hierarchyLines.push(T.delegates(delegates.map((n) => `**${n}**`).join(', ')))
   }
 
   return [
-    '## A flotta többi agense',
+    T.heading,
     '',
-    'Ez a lista automatikusan generálódik az ágens indulásakor, ez a mérvadó és naprakész forrás.',
-    'Ha a fenti szövegben régebbi, kézzel írt felsorolás szerepel, ezt a szekciót vedd figyelembe.',
+    ...T.intro,
     '',
     roster,
     '',
     ...(hierarchyLines.length > 0 ? [...hierarchyLines, ''] : []),
-    'Ha egy kérés egyértelműen más szakterületére esik, jelezd vagy delegáld inter-agent üzenettel a megfelelő ágensnek.',
+    T.outro,
   ].join('\n')
 }
 
@@ -3647,7 +3728,8 @@ function ownTokenConsume403(name: string): string {
 
 // `helper`: the recipes go through scripts/marveen-api.sh (agentUsesApiHelper: every agent whose settings do not deny
 // it). `strict`: the agent also has the "Dashboard-hívások a strict profilodban" section the level-1 text points at.
-function buildAutonomyBody(name: string, helper = true, strict = false): string {
+export function buildAutonomyBody(name: string, helper = true, strict = false): string {
+  if (agentTextLang() === 'en') return buildAutonomyBodyEn(name, helper, strict, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Autonómia és jóváhagyás',
@@ -3727,6 +3809,7 @@ function buildAutonomyBody(name: string, helper = true, strict = false): string 
 // senders check every recipient), and the paragraph then says so: the text
 // must stay true for the install it is written into.
 export function buildEvidenceBody(isMainAgent = false, mainLedger = mainAgentRecipientLedgerEnabled()): string {
+  if (agentTextLang() === 'en') return buildEvidenceBodyEn(isMainAgent, mainLedger, scaffoldFrags(MAIN_AGENT_ID))
   const gateParagraphs: string[] = isMainAgent && mainLedger
     ? [
         'Kimenő levélnél a címzett-ledger (`store/verified-recipients.json`) **nálad is gépi kapu**: ez a telepítés bekapcsolta (`MAIN_AGENT_RECIPIENT_LEDGER=1` a `.env`-ben). A jóváhagyás-kapu minden küldés, piszkozat és Bash-küldés címzettjét a ledgerhez méri, mielőtt bármilyen jóváhagyás fogyna, és a projekt saját küldői is csak a ledgerben lévő címre kézbesítenek, a gazda-CC-re is. Amit a kapu nem lát, az a szkriptbe zárt cím: azt a szabály tartja, nem a gép.',
@@ -3809,7 +3892,7 @@ export function ensureEvidenceSection(name: string): void {
 
   let updated: string
   if (EVIDENCE_BLOCK_RE.test(existing)) {
-    updated = existing.replace(EVIDENCE_BLOCK_RE, block)
+    updated = existing.replace(EVIDENCE_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -3842,7 +3925,7 @@ export function ensureMcpListChannelSection(name: string): void {
 
   let updated: string
   if (MCPLIST_BLOCK_RE.test(existing)) {
-    updated = existing.replace(MCPLIST_BLOCK_RE, block)
+    updated = existing.replace(MCPLIST_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -3871,6 +3954,7 @@ const MSGCLOSE_BLOCK_RE = new RegExp(
 // token); the default keeps the zero-argument call shape. `helper`: the recipe goes through
 // scripts/marveen-api.sh (agentUsesApiHelper), the token never on a command line (VOICETOKENLEAK1101 PR-A1).
 export function buildMessageCloseBody(helper = true, name: string = MAIN_AGENT_ID): string {
+  if (agentTextLang() === 'en') return buildMessageCloseBodyEn(helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Üzenet lezárása: bejövő riportnál `notify:false`',
@@ -3923,7 +4007,7 @@ export function ensureMessageCloseSection(name: string): void {
   }
 
   const updated = MSGCLOSE_BLOCK_RE.test(existing)
-    ? existing.replace(MSGCLOSE_BLOCK_RE, block)
+    ? existing.replace(MSGCLOSE_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -3948,6 +4032,7 @@ const BGCHECKPOINT_BLOCK_RE = new RegExp(
 )
 
 export function buildBackgroundCheckpointBody(): string {
+  if (agentTextLang() === 'en') return buildBackgroundCheckpointBodyEn()
   return [
     '## Hosszú háttér-munka: menet közbeni mentés, folytatás a mentett részből',
     '',
@@ -3984,7 +4069,7 @@ export function ensureBackgroundCheckpointSection(name: string): void {
   }
 
   const updated = BGCHECKPOINT_BLOCK_RE.test(existing)
-    ? existing.replace(BGCHECKPOINT_BLOCK_RE, block)
+    ? existing.replace(BGCHECKPOINT_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -4017,7 +4102,7 @@ export function ensureAutonomySection(name: string): void {
 
   let updated: string
   if (AUTONOMY_BLOCK_RE.test(existing)) {
-    updated = existing.replace(AUTONOMY_BLOCK_RE, block)
+    updated = existing.replace(AUTONOMY_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4055,7 +4140,7 @@ export function ensureFleetRosterSection(name: string): void {
 
   let updated: string
   if (FLEET_ROSTER_BLOCK_RE.test(existing)) {
-    updated = existing.replace(FLEET_ROSTER_BLOCK_RE, block)
+    updated = existing.replace(FLEET_ROSTER_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4131,7 +4216,8 @@ const SKILLS_TRAP_BLOCK_RE = new RegExp(
   `${SKILLS_TRAP_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${SKILLS_TRAP_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
 )
 
-function buildSkillsPathTrapBody(name: string): string {
+export function buildSkillsPathTrapBody(name: string): string {
+  if (agentTextLang() === 'en') return buildSkillsPathTrapBodyEn(name === MAIN_AGENT_ID)
   const isMain = name === MAIN_AGENT_ID
   const shared = [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
@@ -4248,7 +4334,7 @@ export function ensureSkillsPathTrapSection(name: string): void {
 
   let updated: string
   if (SKILLS_TRAP_BLOCK_RE.test(existing)) {
-    updated = existing.replace(SKILLS_TRAP_BLOCK_RE, block)
+    updated = existing.replace(SKILLS_TRAP_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4285,8 +4371,8 @@ export function findSection(text: string, heading: string): { start: number; end
 }
 
 /** The CLAUDE.md with an unedited retired skill section replaced by `current`, or null when nothing changes. */
-export function upgradeRetiredSkillSection(text: string, retired: string[], current: string): string | null {
-  const at = findSection(text, SKILL_SECTION_HEADING)
+export function upgradeRetiredSkillSection(text: string, retired: string[], current: string, heading: string = SKILL_SECTION_HEADING): string | null {
+  const at = findSection(text, heading)
   if (!at) return null
   const norm = normalizeSectionWhitespace(text.slice(at.start, at.end))
   if (norm === normalizeSectionWhitespace(current)) return null
@@ -4300,11 +4386,13 @@ export function upgradeRetiredSkillSection(text: string, retired: string[], curr
 // migration. The path is a test seam only.
 export function readRetiredSkillSections(
   p: string = join(PROJECT_ROOT, 'templates', 'retired-claude-md-sections.json'),
+  // PERSONAESC1107: the list under this heading; the English section's old texts go under its English heading.
+  heading: string = SKILL_SECTION_HEADING,
 ): string[] {
   if (!existsSync(p)) return []
   try {
     const parsed = JSON.parse(readFileSync(p, 'utf-8')) as Record<string, unknown>
-    const list = parsed[SKILL_SECTION_HEADING]
+    const list = parsed[heading]
     return Array.isArray(list) ? list.filter((s): s is string => typeof s === 'string') : []
   } catch (err) {
     logger.warn({ err, path: p }, 'ensureSkillSectionCurrent: retired-claude-md-sections.json unreadable, the skill section is not migrated')
@@ -4348,8 +4436,14 @@ export function ensureSkillSectionCurrent(name: string, retiredPath?: string): b
   const thisForm = buildSkillSection(helper ? name : undefined, tokenFile)
   // SKILLAPPROVALOFF1101: the section as both forms read before the quarantine became a switch. It carries the agent's
   // own token path and name, so it cannot be a fixed entry of the retired file: it is rebuilt from today's form.
-  const retired = [...readRetiredSkillSections(retiredPath), otherForm, preQuarantineSwitchSection(otherForm), preQuarantineSwitchSection(thisForm)]
-  const updated = upgradeRetiredSkillSection(existing, retired, thisForm)
+  // PERSONAESC1107: an English install looks only for the English heading; its retired forms are the other recipe form
+  // and the English heading's list in the retired file (where a later English wording's old text goes, EGM review).
+  // Never cross-language: a Hungarian section on an English install (a key set by hand) is left alone, a documented limit.
+  const english = agentTextLang() === 'en'
+  const retired = english
+    ? [...readRetiredSkillSections(retiredPath, SKILL_SECTION_HEADING_EN), otherForm]
+    : [...readRetiredSkillSections(retiredPath), otherForm, preQuarantineSwitchSection(otherForm), preQuarantineSwitchSection(thisForm)]
+  const updated = upgradeRetiredSkillSection(existing, retired, thisForm, english ? SKILL_SECTION_HEADING_EN : SKILL_SECTION_HEADING)
   if (updated === null || updated === existing) return false
   atomicWriteFileSync(claudeMdPath, updated)
   return true
@@ -4370,6 +4464,7 @@ const SYSTEM_DIRECTIVE_AUTH_BLOCK_RE = new RegExp(
 )
 
 export function buildSystemDirectiveAuthBody(name: string, helper = true): string {
+  if (agentTextLang() === 'en') return buildSystemDirectiveAuthBodyEn(name, helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Rendszer-direktíva hitelesítés (KÖTELEZŐ, végrehajtás előtt)',
@@ -4420,7 +4515,7 @@ export function ensureSystemDirectiveAuthSection(name: string): void {
 
   let updated: string
   if (SYSTEM_DIRECTIVE_AUTH_BLOCK_RE.test(existing)) {
-    updated = existing.replace(SYSTEM_DIRECTIVE_AUTH_BLOCK_RE, block)
+    updated = existing.replace(SYSTEM_DIRECTIVE_AUTH_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4446,6 +4541,7 @@ const AGENT_ID_HEADER_BLOCK_RE = new RegExp(
 // customer deleted 84 rows trusting it. agent-id-header-delete-truth.test.ts
 // ties this text to that behaviour.
 export function buildAgentIdHeaderBody(name: string, helper = true): string {
+  if (agentTextLang() === 'en') return buildAgentIdHeaderBodyEn(name, helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Ki hívta az API-t: az `X-Agent-Id` fejléc',
@@ -4505,7 +4601,7 @@ export function ensureAgentIdHeaderSection(name: string): void {
   }
 
   const updated = AGENT_ID_HEADER_BLOCK_RE.test(existing)
-    ? existing.replace(AGENT_ID_HEADER_BLOCK_RE, block)
+    ? existing.replace(AGENT_ID_HEADER_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -4773,7 +4869,7 @@ export function ensureThinChiefHandoffSection(name: string): void {
 
   let updated: string
   if (THIN_CHIEF_BLOCK_RE.test(existing)) {
-    updated = existing.replace(THIN_CHIEF_BLOCK_RE, block)
+    updated = existing.replace(THIN_CHIEF_BLOCK_RE, () => block)
   } else {
     updated = existing.trimEnd() + '\n\n' + block + '\n'
   }
@@ -4809,6 +4905,7 @@ const MEMORY_SEARCH_LABEL_BLOCK_RE = new RegExp(
 // so the header dump file is genuinely per-agent and two agents searching at the
 // same time cannot read each other's label out of one shared /tmp path.
 export function buildMemorySearchLabelBody(name: string, helper = true): string {
+  if (agentTextLang() === 'en') return buildMemorySearchLabelBodyEn(name, helper, scaffoldFrags(name))
   const tokenPath = dashboardTokenPathFor(name)
   return [
     '## Memória-keresés: a FEJLÉCET is olvasd el (KÖTELEZŐ)',
@@ -4892,7 +4989,7 @@ export function ensureMemorySearchLabelSection(name: string): void {
 
   const block = `${MEMORY_SEARCH_LABEL_BEGIN}\n${buildMemorySearchLabelBody(name, agentUsesApiHelper(name))}\n${MEMORY_SEARCH_LABEL_END}`
   const updated = hasBlock
-    ? existing.replace(MEMORY_SEARCH_LABEL_BLOCK_RE, block)
+    ? existing.replace(MEMORY_SEARCH_LABEL_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -4936,6 +5033,7 @@ const FLEET_AUTH_BLOCK_RE = new RegExp(
 // Host-agnostic on purpose: no operator name, no per-install agent names. The
 // rule is about the auth PATH, which is identical on every install.
 export function buildFleetAuthBody(): string {
+  if (agentTextLang() === 'en') return buildFleetAuthBodyEn()
   return [
     '## Flotta-szintű AUTH-szabály (MEGSZEGHETETLEN)',
     '',
@@ -4990,7 +5088,7 @@ export function ensureFleetAuthSection(name: string): void {
 
   const block = `${FLEET_AUTH_BEGIN}\n${buildFleetAuthBody()}\n${FLEET_AUTH_END}`
   const updated = hasBlock
-    ? existing.replace(FLEET_AUTH_BLOCK_RE, block)
+    ? existing.replace(FLEET_AUTH_BLOCK_RE, () => block)
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
@@ -5037,6 +5135,7 @@ const helperExitCodes = [
 ]
 
 export function buildStrictApiBody(name: string): string {
+  if (agentTextLang() === 'en') return buildStrictApiBodyEn(name, scaffoldFrags(name))
   return [
     '## Dashboard-hívások a strict profilodban',
     '',
@@ -5069,6 +5168,7 @@ const API_HELPER_BLOCK_RE = new RegExp(
 )
 
 export function buildApiHelperBody(name: string): string {
+  if (agentTextLang() === 'en') return buildApiHelperBodyEn(name, scaffoldFrags(name))
   return [
     '## Dashboard-hívások: a segéd (ez ÍRJA FELÜL a curl-recepteket)',
     '',
@@ -5110,7 +5210,7 @@ export function ensureApiHelperSection(name: string): void {
   if (!agentRunsStrict(name) && agentUsesApiHelper(name)) {
     const block = `${API_HELPER_BEGIN}\n${buildApiHelperBody(name)}\n${API_HELPER_END}`
     updated = hasBlock
-      ? existing.replace(API_HELPER_BLOCK_RE, block)
+      ? existing.replace(API_HELPER_BLOCK_RE, () => block)
       : existing.trimEnd() + '\n\n' + block + '\n'
   } else {
     if (!hasBlock) return
@@ -5140,7 +5240,7 @@ export function ensureStrictApiSection(name: string): void {
   if (agentRunsStrict(name)) {
     const block = `${STRICT_API_BEGIN}\n${buildStrictApiBody(name)}\n${STRICT_API_END}`
     updated = hasBlock
-      ? existing.replace(STRICT_API_BLOCK_RE, block)
+      ? existing.replace(STRICT_API_BLOCK_RE, () => block)
       : existing.trimEnd() + '\n\n' + block + '\n'
   } else {
     if (!hasBlock) return
@@ -5156,7 +5256,8 @@ export function ensureStrictApiSection(name: string): void {
 // #2232: the helper recipes a strict-profile agent gets in place of the curl lines of the creation prompt below;
 // since VOICETOKENLEAK1101 PR-A2 every agent whose settings allow the helper (agentUsesApiHelper) gets them too, with
 // a neutral intro (the dontAsk sentence is strict-only). One fixed payload file per recipe kind, in the agent's dir.
-function strictPromptRecipes(name: string, strict = true) {
+function strictPromptRecipes(name: string, strict = true): PromptRecipes {
+  if (agentTextLang() === 'en') return strictPromptRecipesEn(strict, scaffoldFrags(name))
   const mem = shellWord(apiPayloadPath(name, 'memoria'))
   const log = shellWord(apiPayloadPath(name, 'naplo'))
   const msg = shellWord(apiPayloadPath(name, 'uzenet'))
@@ -5202,6 +5303,12 @@ function strictSkillProposeRecipe(name: string): string {
 // The token file is the agent's own (dashboardTokenPathFor, #2325), as in every other
 // recipe of the CLAUDE.md.
 export function buildSkillSection(strictAgent?: string, tokenFile: string = mainTokenPath()): string {
+  if (agentTextLang() === 'en') {
+    return buildSkillSectionEn({
+      strictRecipe: strictAgent ? { draft: join(agentDir(strictAgent), 'skill-javaslat.md'), reason: join(agentDir(strictAgent), 'skill-javaslat-indok.txt') } : null,
+      tokenFile, f: scaffoldFrags(strictAgent ?? MAIN_AGENT_ID),
+    })
+  }
   return `## Öntanulás és Skill rendszer
 
 Te egy önfejlesztő ágens vagy. A munkád során tanulsz, és újrafelhasználható skill-eket hozol létre.
@@ -5275,7 +5382,13 @@ export async function generateClaudeMd(name: string, description: string, model:
   const R = strictPromptRecipes(name, strict)
   // The generated sections (autonomy, skill) are rendered as on every start: helper recipes unless the settings deny it.
   const helper = agentUsesApiHelper(name)
-  const prompt = `You are creating the CLAUDE.md (project instructions) file for an AI agent.
+  const prompt = agentTextLang() === 'en'
+    ? buildClaudeMdPromptEn({
+        name, description, model, ownerName: OWNER_NAME, appTz: APP_TZ, driveFolder: ownerDriveFolder,
+        agentsDir: join(PROJECT_ROOT, 'agents'), helper, R, skillSection: buildSkillSection(helper ? name : undefined, tokenPath),
+        f: scaffoldFrags(name),
+      })
+    : `You are creating the CLAUDE.md (project instructions) file for an AI agent.
 Agent name: ${name}
 Description of what the agent should do: ${description}
 Model: ${model}
@@ -5481,7 +5594,7 @@ function blockedHint(target: string, reason: string): string {
 }
 
 export async function generateSoulMd(name: string, description: string): Promise<string> {
-  const prompt = `You are creating the SOUL.md (personality definition) for an AI agent.
+  const prompt = agentTextLang() === 'en' ? buildSoulPromptEn(name, description, OWNER_NAME) : `You are creating the SOUL.md (personality definition) for an AI agent.
 Agent name: ${name}
 Description: ${description}
 
@@ -5509,7 +5622,7 @@ Output ONLY the markdown content, no code fences.`
 }
 
 export async function generateSkillMd(skillName: string, description: string): Promise<string> {
-  const prompt = `You are creating a SKILL.md file for a Claude Code skill. Follow this exact format:
+  const prompt = agentTextLang() === 'en' ? buildSkillPromptEn(skillName, description, OWNER_NAME) : `You are creating a SKILL.md file for a Claude Code skill. Follow this exact format:
 
 Skill name: ${skillName}
 What the user described: ${description}

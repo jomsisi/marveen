@@ -120,7 +120,7 @@ Napi napló (append-only; a `naplo.txt` első sora `## HH:MM -- Téma`, alatta m
 bash scripts/marveen-api.sh daily-log {{MAIN_AGENT_ID}} naplo.txt
 ```
 
-**A FEJLECBEN NINCS ORA, ES EZ SZANDEKOS (2026-08-21).** A sablon korabban `## HH:MM -- Tema` volt,
+**A FEJLECBEN NINCS ORA, ES EZ SZANDEKOS (2026-08-21).** A sablon korabban `## HH:MM` fejlécű volt,
 es az orat a flotta tagjai rendszeresen BECSULVE irtak be, nem merve: a bossnal nyolc esetbol nyolc,
 safarnal nyolcbol hat volt hamis (a legnagyobb tevedes 194 perc). A tarolo `created_at`-et rogzit,
 tehat az ora redundans volt -- es pont az az egyetlen resz, ami hazudni tudott. Ha egy sablon olyan
