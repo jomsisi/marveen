@@ -28,6 +28,7 @@ mean "let it through". The block message says how to make it inspectable.
 Contract: PreToolUse. Reads the hook payload on stdin, exit 0 = allow,
 exit 2 = block (stderr goes back to the model).
 """
+import html
 import json
 import os
 import re
@@ -711,7 +712,7 @@ TECHNICAL = re.compile(
       | [\w.+-]+@[\w-]+\.[\w.]+     # email
       | `[^`]*`                     # kod-span
       | \b\w+(?:_\w+)+\b            # snake_case azonosito
-      | \b\w+\.[A-Za-z]{2,10}\b     # fajlnev / domain (video.mp4, marveen.io)
+      | \b\w+\.[A-Za-z]{2,10}(?:-[a-záéíóöőúüű]{1,4})?\b   # fajlnev / domain, magyar toldalekkal (video.mp4, marveen.io, Mail.app-ot)
       | \b[\w-]*/[\w/-]+            # utvonal / slug
       | \d+(?:[.:,]\d+)*-[^\W\d_]+   # szam + magyar toldalek (8:09-es, 2-es, 17:06-kor)
       | \b[A-ZÁÉÍÓÖŐÚÜŰ][^\W\d_]*-[a-záéíóöőúüű]{1,4}\b   # tulajdonnev + toldalek (Chrome-ot, Drive-ra)
@@ -875,7 +876,15 @@ def telegram_gate(tool_input: dict) -> None:
 
 def audit(text: str):
     """Return a list of human-readable problems."""
-    plain = TAG.sub(" ", text)
+    # COPYGATEENT914 (Marveen merese, 2026-09-14, egy VALODI vevo-levelen): a
+    # tag-kiszedes onmagaban megkerulheto HTML-ENTITASSAL. A `&mdash;` (es a
+    # szamos `&#8212;` / hex `&#x2014;` alak) atment a kapun, a cimzettnel
+    # viszont gondolatjelkent renderel -- vagyis a kapu zoldet mondott arra,
+    # amit tilt. Merve mind a harom alakon.
+    # A SORREND SZANDEKOS: eloszor a tageket szedjuk ki, AZUTAN dekodolunk.
+    # Forditva egy szovegkent mutatott, escape-elt jelolo (`&lt;b&gt;`) valodi
+    # tagge dekodolodna, es a TAG.sub kitorolne a szoveg egy darabjat.
+    plain = html.unescape(TAG.sub(" ", text))
     problems = []
     if EM_DASH in plain:
         problems.append(
@@ -963,9 +972,14 @@ MANAGE_EMAIL_OUTBOUND_OPS = {"send", "reply", "replyall", "forward"}
 # Dedicated (non-multiplexed) outbound tools: the draft tools and the Gmail
 # connector's three separate send-shaped tools. Kept in step with the matcher
 # this hook is registered under in settings.json.
+# GMAILCONNECTOR914: the server segment is NOT always exactly "gmail" -- the
+# claude.ai connector is mcp__claude_ai_Gmail__send_message, one underscore
+# before Gmail, and `(^|__)gmail__` never matched it, so its sends fell through
+# to sys.exit(0) with no audit (measured 2026-08-30, 2026-09-08). Anything
+# ending in "gmail__<send-shaped tool>" is a send now, whatever the prefix.
 EMAIL_TOOL_RE = re.compile(
     r"(send_email|create_draft|draft_email|update_draft"
-    r"|(^|__)gmail__(reply|reply_all|send_message|forward)$)",
+    r"|gmail__(reply|reply_all|send_message|forward)$)",
     re.I,
 )
 

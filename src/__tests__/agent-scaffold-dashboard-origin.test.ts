@@ -164,6 +164,26 @@ describe('generateClaudeMd prompt: no hardcoded localhost:3420', () => {
     expect(fnBody).toMatch(/agent-msg\.sh \S+ \S+ -/)
   })
 
+  // GH #944: the curl examples always used the absolute ${tokenPath}, but the
+  // prose line above them named the token by its project-relative path. Agents
+  // copy prose as readily as code, and a sub-agent's working directory is
+  // agents/<name>/, where store/.dashboard-token does not exist. `cat` on a
+  // missing file yields an empty string, so curl sends "Authorization: Bearer "
+  // and the call 401s with nothing logged on the agent side. Two agents hit it
+  // independently on 2026-08-09.
+  it('never names the token by a project-relative path in the prompt body', () => {
+    expect(fnBody).not.toContain('store/.dashboard-token')
+  })
+
+  it('names the token by the absolute tokenPath in the prose, not only in the curl examples', () => {
+    expect(fnBody).toContain('a token a ${tokenPath} fájlban')
+  })
+
+  it('states the working-directory rule that makes the absolute path necessary', () => {
+    expect(fnBody).toContain('A munkakönyvtárad NEM a projekt gyökere')
+    expect(fnBody).toContain('MINDIG abszolút úttal hivatkozz')
+  })
+
   it('defines dashboardOrigin using resolveDashboardOrigin, passing AGENT_API_ORIGIN', () => {
     // Ensures the fallback logic lives in one place (resolveDashboardOrigin),
     // not as an ad-hoc inline expression that could diverge from the heartbeat
@@ -196,13 +216,14 @@ describe('renderHeartbeatClaudeMd: respects dashboardOrigin', () => {
   it('uses a public URL when dashboardOrigin is set to one', () => {
     const id: HeartbeatIdentity = { ...BASE, dashboardOrigin: 'https://marveen.example.com' }
     const out = renderHeartbeatClaudeMd(id)
-    expect(out).toContain('https://marveen.example.com/api/schedules')
-    expect(out).not.toContain('http://localhost:3420/api/schedules')
+    // Fork: the heartbeat prompt names the origin in prose (the writes go through helpers).
+    expect(out).toContain('https://marveen.example.com')
+    expect(out).not.toContain('http://localhost:3420')
   })
 
   it('falls back to localhost when dashboardOrigin is the localhost default', () => {
     const out = renderHeartbeatClaudeMd(BASE)
-    expect(out).toContain('http://localhost:3420/api/schedules')
+    expect(out).toContain('http://localhost:3420')
   })
 
   it('emits no hardcoded hostname other than the dashboardOrigin host', () => {

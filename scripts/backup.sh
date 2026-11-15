@@ -51,6 +51,14 @@
 
 set -euo pipefail
 
+# The archive carries live secrets (store/.claude-oauth-token, .dashboard-token,
+# the vault master key next to vault.json, every channel .env). It must be
+# born 0600 -- not chmod-ed afterwards, because a crash between tar and chmod
+# would leave a world-readable copy (BACKUPTITOK915: measured 0644 on the
+# owner host under the default umask 022). umask 077 covers the archive, the
+# backups/ dir, the staging dir and every temp file this script creates.
+umask 077
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Overridable so a test can build a throwaway archive without touching the
 # real backup directory (and its retention sweep).
@@ -100,6 +108,12 @@ add_if() {
 #     profile and generated PDFs: 3.2 GB, all re-downloadable or reproducible
 #   *.log, *.out, *.pid       -- runtime noise, worthless in a restore
 # What remains is ~4 MB next to the DB, so the archive stays small.
+#   backups                   -- store/backups holds OTHER machines' tarballs (two 2026-07-13
+#     hermes dumps, 701 MB): a backup inside the backup, and not this host's state
+#   darwin-relay              -- relay.log (87 MB): a log, not state; nothing restores from it
+#   (measured 2026-09-16: these two were 788 MB of a 948 MB archive; excluding them
+#    leaves ~150 MB. STORE_SKIP does not delete anything -- the files stay on disk.)
+STORE_SKIP=" whisper health cowork venv-garmin venv-pdf dhl-chrome-profile fedex-labels fedex-vam archery-basis backups darwin-relay mi-club-export mennyiseg-meres "
 # FORK ADDITIONS to the skip list (measured 2026-11-15 on the live store):
 #   mi-club-export    -- 370 MB, re-downloadable from MI Club at any time
 #   mennyiseg-meres   -- ~14 MB raw shop data, regenerable; ONLY its scripts
@@ -107,7 +121,6 @@ add_if() {
 # store/hirlevel-lista and store/reports (personal data) ARE taken by this rule on
 # purpose: this is the LOCAL package. The cloud package (backup-munkaadat.sh) copies
 # only skills/ and scheduled-tasks/ from $HOME, so it stays secret- and PII-free.
-STORE_SKIP=" whisper health cowork venv-garmin venv-pdf dhl-chrome-profile fedex-labels fedex-vam archery-basis mi-club-export mennyiseg-meres "
 if [[ -d store ]]; then
   while IFS= read -r _entry; do
     _name="$(basename "${_entry}")"
@@ -234,12 +247,21 @@ if [[ -d "${HOME}/.claude/projects" ]]; then
   ( cd "${HOME}" && find .claude/projects -mindepth 2 -maxdepth 2 -type d -name 'memory' -print ) >> "${HOMELIST}"
 fi
 # MAIN orchestrator channel tokens + pairing state, per provider. bot.pid and
-# inbox/ are runtime/transient and intentionally excluded.
+# inbox/ are runtime/transient and intentionally excluded. Since #915 the
+# main state dir is install-scoped (<repo>/.claude/channels/<provider>); the
+# HOME base only still holds it on an unmigrated install -- take both, each
+# from its own list so restore puts them back where they came from.
 if [[ -d "${HOME}/.claude/channels" ]]; then
   ( cd "${HOME}" && find .claude/channels -maxdepth 2 \
       \( -name '.env' -o -name 'access.json' -o -name 'invites.json' \) \
       -print ) >> "${HOMELIST}"
   ( cd "${HOME}" && find .claude/channels -maxdepth 2 -type d -name 'approved' -print ) >> "${HOMELIST}"
+fi
+if [[ -d "${REPO_ROOT}/.claude/channels" ]]; then
+  ( cd "${REPO_ROOT}" && find .claude/channels -maxdepth 2 \
+      \( -name '.env' -o -name 'access.json' -o -name 'invites.json' \) \
+      -print ) >> "${REPOLIST}"
+  ( cd "${REPO_ROOT}" && find .claude/channels -maxdepth 2 -type d -name 'approved' -print ) >> "${REPOLIST}"
 fi
 # launchd jobs for this fleet. The job labels are com.<MAIN_AGENT_ID>.<service>
 # (see src/web/main-agent.ts), so resolve MAIN_AGENT_ID the way the app does

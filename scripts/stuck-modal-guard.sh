@@ -43,7 +43,14 @@ FIRSTSEEN_STAMP="$STORE/.stuck-modal-firstseen"
 RESPAWN_STAMP="$STORE/.channel-last-respawn"           # SHARED with channel-watchdog.sh
 RESPAWN_COUNT_FILE="$STORE/.stuck-modal-respawns"
 BACKOFF_STAMP="$STORE/.stuck-modal-backoff-alerted"
-TG_ENV="$HOME/.claude/channels/telegram/.env"
+# #915: main channel state is install-scoped once migrated; the legacy shared
+# path only serves unmigrated installs.
+TG_CHAN_DIR="${TELEGRAM_STATE_DIR:-}"
+if [ -z "$TG_CHAN_DIR" ]; then
+  TG_CHAN_DIR="$INSTALL_DIR/.claude/channels/telegram"
+  [ -f "$TG_CHAN_DIR/.env" ] || TG_CHAN_DIR="$HOME/.claude/channels/telegram"
+fi
+TG_ENV="$TG_CHAN_DIR/.env"
 LOG_TAG="stuck-modal-guard"
 
 STUCK_SECONDS="${STUCK_MODAL_SECONDS:-120}"   # must stay stuck this long before acting
@@ -294,7 +301,7 @@ run_guard() {
     _cfg_mode="${_cfg_line%%	*}"
     _cfg_dir="${_cfg_line#*	}"
     if [ -n "$_cfg_line" ] && [ -d "$_cfg_dir" ]; then
-      if [ "$_cfg_mode" = "explicit" ]; then
+      if [ "$_cfg_mode" = "explicit" ] || [ "$_cfg_mode" = "rotated" ]; then
         CFG_ENV="export CLAUDE_CONFIG_DIR='$_cfg_dir' && "
       else
         CFG_ENV="export CLAUDE_CONFIG_DIR='$_cfg_dir' && export CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat '$INSTALL_DIR/store/.claude-oauth-token')\" && "

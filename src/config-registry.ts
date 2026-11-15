@@ -285,6 +285,53 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     requiresRestart: true,
   },
   {
+    key: 'EMBED_URL',
+    type: 'string',
+    default: '',
+    description: 'Az embedding-hívások Ollama alap-URL-je. Üres = az OLLAMA_URL-t használja. Külön kulcs, mert az OLLAMA_URL-t négy másik hívó a natív ollama API-ra használja, és az ágensek ANTHROPIC_BASE_URL-je is abból jön.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
+    key: 'EMBED_MODEL',
+    type: 'string',
+    default: 'nomic-embed-text',
+    description: 'A memória-embedding modellje. Váltás után MINDEN emléket újra kell embeddelni: a különböző dimenziójú vektorok nem összehasonlíthatók.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
+    key: 'EMBED_DIMS',
+    type: 'int',
+    default: 0,
+    min: 0,
+    max: 8192,
+    description: 'Matryoshka-csonkolás: a natív vektor első N eleme (a koszinusz újranormalizál). 0 = nincs csonkolás. Csak CSÖKKENTHET, rövidebb vektort nem told fel.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
+    key: 'AGENT_LOCAL_BASE_URL',
+    type: 'string',
+    default: '',
+    description: 'A lokál modellen futó ágensek ANTHROPIC_BASE_URL-je. Üres = az OLLAMA_URL-t használja. Külön kulcs, mert az OLLAMA_URL-t másik négy hívó a natív ollama API-ra (/api/tags, /api/generate) használja, amit egy Anthropic-kompatibilis proxy nem szolgál ki.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
+    key: 'MEMORY_IMPORT_CATEGORIZE_MODEL',
+    type: 'string',
+    default: '',
+    description: 'Memória-importkor ezzel az Ollama modellel sorolja be az emlékeket (hot/warm/cold/shared), pl. gemma3:4b. FELÜLBÍRÁLÁS: ha be van állítva, pontosan ez a modell fut, helyettesítés nincs. Üres = a telepített gemma4 felismerése; ha nincs gemma4 és nincs beállítás, minden emlék warm, modellhívás nélkül. 4 GB VRAM-on a gemma3:4b bevált; gondolkodó modell (pl. qwen3) nagyon lassú.',
+    module: 'system',
+    secret: false,
+    requiresRestart: true,
+  },
+  {
     key: 'TELEGRAM_PROGRESS_MODE',
     type: 'string',
     default: 'indicator',
@@ -300,6 +347,15 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     default: 'hu',
     valueSet: ['hu', 'en'],
     description: 'A dashboard alapértelmezett megjelenítési nyelve (hu = magyar, en = angol). A böngészőben mentett preferencia (localStorage) felülírja.',
+    module: 'system',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'OWNER_DRIVE_FOLDER',
+    type: 'string',
+    default: '',
+    description: 'A flotta közös Google Drive mappájának ID-je (a mappa-URL /folders/ utáni része). A generált kolléga-asszisztensek ide írják az eredmény-fájlokat. Üres = a generált agent a tulajdonostól kéri el a mappát. Hot-reload: agent-generáláskor olvasódik, nem igényel újraindítást.',
     module: 'system',
     secret: false,
     requiresRestart: false,
@@ -467,6 +523,22 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
       'claude-opus-4-8[1m]',
       'claude-haiku-4-5-20251001',
     ],
+  },
+  // --- Claude plans module (PR2b/PR2c) ---
+  // Gates BOTH POST /api/claude-plans/rotate (returns 409 while off) and the
+  // heartbeat script's decision to call it (scripts/claude-plan-rotate-check.ts)
+  // -- see docs/superpowers/specs/2026-09-11-claude-key-rotation-design.md
+  // sections 6-7. Default OFF: staging verification (live session-restart,
+  // the riskiest part of this feature) happens before an operator ever flips
+  // this to '1'.
+  {
+    key: 'CLAUDE_ROTATION_ENABLED',
+    type: 'boolean',
+    default: '0',
+    description: 'Automata Claude-kulcs rotáció: ha a fő agent aktív előfizetése kifogy, automatikusan váltson egy másik regisztrált planre. Előfeltétel: MAIN_AGENT_ISOLATED_CONFIG=1 és legalább 2 regisztrált plan a claude-plans.json-ban. A váltás a fő agent session-jének újraindításával jár.',
+    module: 'claude-plans',
+    secret: false,
+    requiresRestart: false,
   },
 ]
 

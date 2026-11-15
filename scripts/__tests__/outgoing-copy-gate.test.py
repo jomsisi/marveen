@@ -241,6 +241,82 @@ def main():
         code, out, err = run_hook(edit_ok, rules_file=active)
         check("edit_message clean passes (exit 0)", code, 0)
 
+        # --- COPYGATEENT914: HTML-ENTITAS NEM KERULHETI MEG A GONDOLATJEL-TILTAST ---
+        # Marveen merese 2026-09-14, egy VALODI vevo-levelen: a hook a TAGEKET
+        # szedte ki, de az entitast sehol nem dekodolta, igy a `&mdash;` atment
+        # es a cimzettnel gondolatjelkent renderelt. A kapu zoldet mondott arra,
+        # amit tilt. Merve MIND A HAROM alakon, nem csak a bejelentettre.
+        #
+        # A SZOVEG SZANDEKOSAN TELJESEN EKEZETES. Az elso valtozatom ekezet
+        # nelkuli volt, ezert a HIANYZO-EKEZET szabaly is tuzelt, es az exit 2
+        # AKKOR IS teljesult, amikor a dekodolast visszavettem -- a teszt jonak
+        # latszott, kozben nem az entitas-utat merte. A mutans-kontroll fogta meg.
+        for nev, alak in (("nevesitett &mdash;", "&mdash;"),
+                          ("szamos &#8212;", "&#8212;"),
+                          ("hex &#x2014;", "&#x2014;")):
+            ent = {"tool_name": "mcp__plugin_telegram_telegram__reply",
+                   "tool_input": {"text": f"Szia! A határidő {alak} péntek, köszönöm."}}
+            code, out, err = run_hook(ent, rules_file=active)
+            check(f"HTML-entitas gondolatjel blokkol ({nev})", code, 2)
+            check_true(f"...es a GONDOLATJEL indokkal, nem masert ({nev})",
+                       "GONDOLATJEL" in (err or ""), detail=(err or "")[:120])
+
+        # NEGATIV KONTROLL: a dekodolas nem tehet minden `&`-t gyanussa.
+        amp = {"tool_name": "mcp__plugin_telegram_telegram__reply",
+               "tool_input": {"text": "Szia! Kovács &amp; Társa Kft. ajánlata megérkezett."}}
+        code, out, err = run_hook(amp, rules_file=active)
+        check("&amp; onmagaban NEM blokkol", code, 0)
+
+        # A SORREND KONTROLLJA: tag-kiszedes ELOSZOR, dekodolas AZUTAN. Forditva
+        # egy szovegkent mutatott, escape-elt jelolo valodi tagge dekodolodna, es
+        # a TAG.sub kitorolne a szoveg egy darabjat -- a kapu nem hibat jelezne,
+        # hanem CSENDBEN mast vizsgalna, mint amit kuldunk.
+        esc = {"tool_name": "mcp__plugin_telegram_telegram__reply",
+               "tool_input": {"text": "Szia! Írd ki: &lt;b&gt;vastag&lt;/b&gt; szöveggel, köszönöm."}}
+        code, out, err = run_hook(esc, rules_file=active)
+        check("escape-elt jelolo NEM blokkol es nem tunik el", code, 0)
+
+        # A FENTI SOR ONMAGABAN NEM ELEG, ES EZT SAMU MERTE MEG (#1320 review):
+        # csak exit 0-t asszertal, ezert MINDKET sorrenddel zold -- vagyis nem
+        # bizonyitja azt, amit a kommentje allit. Ez a fog viszont diszkriminal
+        # (fuggetlenul visszamerve, True/False):
+        #   HELYES sorrend  -> a dekodolt spanban OTT a tiltott jel      -> exit 2
+        #   CSERELT sorrend -> a span TAGGE dekodolodik, a TAG.sub a jellel
+        #                      EGYUTT torli                             -> exit 0, CSENDES atengedes
+        # Vagyis pontosan az a veszely, amit a hook kommentje leir: a kapu nem
+        # hibat jelez, hanem mast vizsgal, mint amit kuldunk.
+        span = {"tool_name": "mcp__plugin_telegram_telegram__reply",
+                "tool_input": {"text": "Szia! A jelölés: &lt;határidő — péntek&gt; formában áll, köszönöm."}}
+        code, out, err = run_hook(span, rules_file=active)
+        check("escape-elt SPAN-ben rejtett gondolatjel blokkol (sorrend-fog)", code, 2)
+        check("...es a GONDOLATJEL indokkal", "GONDOLATJEL" in (err or ""), True)
+
+        # --- GMAILCONNECTOR914: the claude.ai Gmail connector ----------------
+        # mcp__claude_ai_Gmail__send_message carries ONE underscore before Gmail,
+        # so the old (^|__)gmail__ alternative never matched and the send fell
+        # through to exit 0 with no audit (measured 2026-08-30, 2026-09-08).
+        for tool in ("send_message", "reply", "forward"):
+            bad = {"tool_name": f"mcp__claude_ai_Gmail__{tool}",
+                   "tool_input": {"to": ["a@b.hu"], "messageId": "m1", "subject": "Teszt",
+                                  "body": CLEAN_HU_OK + " — mégis."}}
+            code, out, err = run_hook(bad, rules_file=active)
+            check(f"connector {tool} with em dash blocks (exit 2)", code, 2)
+            ok = {"tool_name": f"mcp__claude_ai_Gmail__{tool}",
+                  "tool_input": {"to": ["a@b.hu"], "messageId": "m1", "subject": "Teszt", "body": CLEAN_HU_OK}}
+            code, out, err = run_hook(ok, rules_file=active)
+            check(f"connector {tool} clean passes (exit 0)", code, 0)
+        fwd = {"tool_name": "mcp__claude_ai_Gmail__forward",
+               "tool_input": {"to": ["a@b.hu"], "messageId": "m1", "forwardText": "Nézd meg — fontos."}}
+        code, out, err = run_hook(fwd, rules_file=active)
+        check("connector forward: forwardText is audited too (exit 2)", code, 2)
+        draft_only = {"tool_name": "mcp__claude_ai_Gmail__send_message", "tool_input": {"draftId": "d1"}}
+        code, out, err = run_hook(draft_only, rules_file=active)
+        check("connector send of a draftId: body unreadable, fail-closed (exit 2)", code, 2)
+        for tool in ("search_threads", "get_thread", "label_message"):
+            code, out, err = run_hook({"tool_name": f"mcp__claude_ai_Gmail__{tool}", "tool_input": {"q": "x — y"}},
+                                      rules_file=active)
+            check(f"connector {tool} is a read: passes untouched (exit 0)", code, 0)
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)

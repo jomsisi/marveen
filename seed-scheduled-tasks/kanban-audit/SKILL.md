@@ -238,7 +238,27 @@ except Exception: print(0)
 
 5. **State-fájl frissítés** (a futás VÉGÉN): `store/kanban-audit-state.json` -> `{"last_audit_at": <current Unix timestamp>}`.
 
-6. **Delegálatlan kártyák**: in_progress/waiting/planned amiknek assignee NULL/üres -> log + Telegram csak akkor ha 3+ ilyen van.
+6. **Delegálatlan kártyák**: minden nem archivált, NEM `done` kártya (kizárással szűrj, ne a státuszok felsorolásával), aminek assignee NULL/üres -> log + Telegram csak akkor ha 3+ ilyen van.
+
+6a. **Detektorral nem fedett státuszú kártyák** (KANBANSTATUSZVAK916, KÖTELEZŐ minden körben): a többi
+   detektor a `planned`, `in_progress`, `waiting`, `done` négyesre szűr, a tábla viszont ennél többet enged
+   (a `kanban_cards` séma CHECK-je szerint a `testing` is érvényes). Az ilyen kártya SEMELYIK detektorban
+   nem jelenik meg (mért eset 2026-09-16: `17d07456`, `testing`, 2026-09-05 óta), az audit számára nem létezik.
+   ```bash
+   curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:$PORT/api/kanban" | python3 -c "
+import json,sys,time
+COVERED={'planned','in_progress','waiting','done'}
+for c in json.load(sys.stdin):
+    if c.get('archived_at') or c.get('status') in COVERED: continue
+    age=(time.time()-(c.get('updated_at') or 0))/86400
+    print(c['id'][:8],'|',c.get('status'),'|',round(age,1),'napja nem mozdult |',(c.get('title') or '')[:50])
+"
+   ```
+   **Ha van találat:** a kör jelentésébe ID-vel, státusszal és korral kerüljön bele, és Telegramon is
+   menjen ki (7. pont), mert ezekre a kártyákra a stuck- és a
+   delegálatlan-mérés nem érvényes. **Ha 0:** a jelentésben is 0-ként szerepeljen, ne maradjon ki,
+   különben nem látszik, hogy a lépés lefutott. A `COVERED` halmazt csak akkor bővítsd, ha
+   az új státuszt egy detektor ténylegesen méri, különben a bővítés újra elrejti a kártyát.
 
 6b. **ELŐRE-DATÁLT CÍM-BÉLYEG detektor** (2026-08-25-én vezetve be, mert a hiba negyedszer fordult elő):
    a kártyacímbe írt óra BECSÜLT lehet, és hosszú munkamenetben MONOTON NÖVEKVŐ eltérést halmoz
@@ -267,9 +287,49 @@ for c in json.load(sys.stdin):
 7. **Telegram csak akkor írj ha**:
    - 3+ beakadt task van (kritikus)
    - Új blokker (waiting > 48h)
+   - Detektorral nem fedett státuszú kártya (6a): ugyanarról a kártyáról naponta legfeljebb egyszer, a többi körben csak a jelentésben
+   - **TULAJDONOSRA VÁRÓ KEMÉNY BLOKKOLÓ, státusztól és kortól függetlenül.**
+     A fenti két küszöb szűk, mert mindkettő ÁLLAPOTOT vagy KORT néz, a
+     blokkoló viszont lehet friss és lehet `planned` is. 2026-08-11: egy
+     kártya arról, hogy elfogyott egy szolgáltató előrefizetett kerete és
+     minden hívás 429-cel tér vissza, `planned` státuszban, 100 perce
+     létezett, tehát SEM a "3+ beakadt", SEM a "waiting > 48h" nem fogta meg.
+     Közben négy szálat állított meg, és csak a tulajdonos tudta feloldani,
+     mert számlázás.
+     A szabály: ha egy kártya (a) kemény megállást ír le, (b) az assignee-je a
+     tulajdonos, vagy a leírása szerint csak ő tudja elvégezni, és (c) nem
+     látszik, hogy szólt volna neki bárki, akkor kimegy Telegramon.
+     A (c) ellenőrzése: nézd meg, kérte-e valaki inter-agent üzenetben a
+     továbbítást, és fusd át a saját kimenő üzeneteidet. Ha kétséges, inkább
+     szólj: a kétszer elmondott blokkoló olcsóbb, mint a négy órát álló flotta.
    - Egyébként csendben (heartbeat-stílus)
 
 ## Buktatók
+- **A saját kommentelésed elrejti a kártyát a kor-alapú metrikák elől.** Egy
+  komment (és minden kártya-írás) frissíti az `updated_at`-et, tehát a
+  `waiting > 48h` lista ÜRESRE válthat attól, hogy az előző körben te magad
+  írtál a kártyára. 2026-08-11, saját mérés: egy kártya 307 órája várt, 12:00-kor
+  kommenteltem rá, és a 16:00-s auditon már 0 volt a `waiting > 48h` -- nem
+  azért, mert megoldódott, hanem mert én nyúltam hozzá. A hiba iránya
+  megnyugtató, és ettől veszélyes: néma nulla, ami sikernek látszik.
+  Ha "0 blokkolót" mérsz, nézd meg, mozgott-e a kártya az előző audit óta ÉS ki
+  mozgatta:
+  ```bash
+  python3 -c "
+  import sqlite3
+  c=sqlite3.connect('store/claudeclaw.db')
+  r=c.execute(\"select author from kanban_comments where card_id=? order by created_at desc limit 1\", ('<id>',)).fetchone()
+  print(r[0] if r else '(nincs komment)')"
+  ```
+  Az `updated_at` az utolsó ÍRÁS ideje, nem a munka utolsó valódi mozgásáé.
+  **A VALÓS kort a `created_at`-tel vesd össze, ha az `updated_at` a te írásod.**
+  2026-08-25: egy kártya 162,5 órásnak mérődött, de az `updated_at` egy héttel
+  korábbi saját kommentem volt; a kártya 14 napja készült. A kétszeres eltérés
+  eldönti, halasztható-e még egy napot, ezért a jelentésben a valós kort mondd,
+  a mérttel együtt.
+  Ebből következik egy tartózkodás is: **ne kommentelj a kártyára pusztán azért,
+  hogy rögzítsd, hogy megnézted.** Ha csak ellenőriztél, a csatornán jelezd, ne a
+  táblán. Kommentet akkor írj, ha MÉRTÉL valamit, ami a kártyán maradandó.
 - **NE `sqlite3` CLI-t és NE `jq`-t használj.** Egyik sincs telepítve egy átlagos Linux
   gépen (a telepítő függőségei: ffmpeg, git, tmux, lsof, curl, python3, pipx, unzip), és a
   hívás ott `exit 127`-tel elhal -- ez a lépés némán kimarad, miközben az audit sikeresnek

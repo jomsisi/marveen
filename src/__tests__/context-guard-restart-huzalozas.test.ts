@@ -34,7 +34,9 @@ const munkakonyvtar = () => join(AGENTS, AGENS)
 const projektDir = () => join(CFG_DIR, 'projects', munkakonyvtar().replace(/[/.]/g, '-'))
 
 /** A telitett pane: a lablecben all a jel, ezt keresi a `paneShowsContextSaturation`. */
-const TELITETT_PANE = ['valami', 'valami mas', '100% context used'].join('\n')
+// v1.39.0: a bare '100% context used' is now only a CLAIM and is checked against the measured
+// percentage; the hard-error banner is final, so the fixture uses that and the wiring is measured.
+const TELITETT_PANE = ['valami', 'valami mas', 'Context limit reached'].join('\n')
 
 const restartAgentProcess = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined }))
 const createAgentMessage = vi.fn()
@@ -61,7 +63,15 @@ vi.mock('../web/agent-process.js', () => ({
   capturePane: () => TELITETT_PANE,
   sendPromptToSession: vi.fn(),
   isSessionReadyForPrompt: async () => false,
+  // v1.39.0: the saturation-banner credibility override registry
+  clearSaturationBannerOverride: vi.fn(),
+  noteSaturationBannerUntrusted: vi.fn(),
 }))
+// v1.39.0: configDirFor moved to main-transcript-root.ts and resolves through claude-plans.
+vi.mock('../web/claude-plans.js', async (orig) => {
+  const actual = await orig<typeof import('../web/claude-plans.js')>()
+  return { ...actual, resolveAgentConfigDirForRead: () => CFG_DIR }
+})
 vi.mock('../web/main-agent.js', () => ({ MAIN_CHANNELS_SESSION: 'marveen-channels' }))
 vi.mock('../web/agent-config.js', async (orig) => {
   const actual = await orig<typeof import('../web/agent-config.js')>()
