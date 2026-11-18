@@ -57,6 +57,7 @@ import {
   expandBraces,
   expandHome,
   globMatchesName,
+  isPipeSink,
   isReadOnlyFsCommand,
   laterRuns,
   nameForms,
@@ -1564,7 +1565,13 @@ export function installFileDeny(command, opts = {}) {
       if ((seg.sep === '|' || seg.sep === '|&') && next) {
         const nw = shellWords(next.own)
         const nn = nw ? commandName(nw) : ''
-        if (!nw || !(READERS.has(nn) || isReadOnlyFsCommand(nw, nn))) return true
+        // MSGSINK1118: the inter-agent helper's stdin is message TEXT, so a quoted heredoc piped into it is data, not a
+        // file list acted on -- the shape CLAUDE.md prescribes for every message. Narrow on purpose: the exception
+        // holds ONLY while the hit comes from the heredoc body alone. If the reader's OWN words name a protected path
+        // (`cat ~/.claude/settings.json | bash scripts/agent-msg.sh ... -`), that file's CONTENT would leave as the
+        // message, and the deny stays.
+        const hitFromBodyOnly = hitsBoth(ownText).length === 0
+        if (!nw || !(READERS.has(nn) || isReadOnlyFsCommand(nw, nn) || (hitFromBodyOnly && isPipeSink(nw, nn)))) return true
       }
       moveCwd(own, seg, ctx)
       continue

@@ -2103,12 +2103,17 @@ export function isReadOnlyFsCommand(words, name) {
 }
 
 const AGENT_MSG_RX = /(?:^|\/)scripts\/agent-msg\.sh$/
+// MSGSINK1118: BOTH inter-agent helpers take the message text on stdin and do nothing else with it, so a reader piped
+// into one is a data sink, not a program acting on the file list it reads. Kept separate from AGENT_MSG_RX on purpose:
+// that one also drives the argument-INDEX residue below (contentIdx = helperAt + 3), and agent-msg-close.sh takes
+// `<id> [done|failed] -`, i.e. an OPTIONAL status, so the content can sit at +2 as well.
+const MSG_HELPER_SINK_RX = /(?:^|\/)scripts\/agent-msg(?:-close)?\.sh$/
 const KANBAN_TOOL_RX = /(?:^|\/)scripts\/kartya-es-ertesites\.py$/
-function isPipeSink(words, name) {
+export function isPipeSink(words, name) {
   if (TEXT_FILTERS.has(name)) return isReadOnlyFsCommand(words, name)
-  // the inter-agent helper: its stdin becomes message content, nothing else
+  // the inter-agent helpers: their stdin becomes message content, nothing else
   const script = (name === 'bash' || name === 'sh') ? words[1] : words[0]
-  return !!script && AGENT_MSG_RX.test(script.value) && words.every((w) => !w.dollar)
+  return !!script && MSG_HELPER_SINK_RX.test(script.value) && words.every((w) => !w.dollar)
 }
 
 // Does a later segment of the same command run or feed a file segment [k] wrote? Then the file is a script, whatever
@@ -2145,7 +2150,10 @@ export function laterRuns(segs, k, targets) {
     if (FILE_RUNNERS.has(name)) return true
     if ((s.sep === '|' || s.sep === '|&') && segs[j + 1]) {
       const nw = shellWords(segs[j + 1].own)
-      if (!nw || isFileRunner(commandName(nw))) return true
+      const nn = nw ? commandName(nw) : ''
+      // MSGSINK1118: `bash scripts/agent-msg.sh ... -` is a file runner by its command word only; the written file is
+      // the message TEXT on its stdin, not a script it runs.
+      if (!nw || (isFileRunner(nn) && !isPipeSink(nw, nn))) return true
     }
   }
   return false
