@@ -614,9 +614,18 @@ export function literalQuotedGlobs(text) {
   }
   return out
 }
+// HEREDOCPUNCT1118: in a LITERAL heredoc body a bare `.`, `..` or `~` token is sentence punctuation, not a path name.
+// `{"content":"Egy mondat (zarojelben valami). Masodik mondat."}` ends a parsed segment at the `)`, so the following
+// `.` becomes a standalone word and matches TARGET_SEGMENT_NAMES ('.', '..', '~' are there for `cd ~/.claude &&
+// rm -rf .`). INSTRFILES1104 already states the same for globs: with no program re-running the text as shell code, a
+// heredoc body holds no path either. Deliberately NOT in literalWords, which literalQuotedGlobs also applies to the
+// segment's OWN quoted spans: there a quoted `"."` IS the path the command acts on, and must keep the strict reading.
+// A body that re-shells, or one a later segment runs, never reaches here (the `literal` flag), and a body holding
+// `$(` or a backtick returns unchanged below.
+const BARE_PATH_WORD_G = /(^|[\s;&|<>()'"`=,:{}])(?:\.\.?|~)(?=$|[\s;&|<>()'"`=,:{}])/g
 export function literalHeredocBody(body) {
   const b = String(body ?? '')
-  return /\$\(|`/.test(b) ? b : literalWords(b)
+  return /\$\(|`/.test(b) ? b : literalWords(b).replace(BARE_PATH_WORD_G, (_m, pre) => pre + '_')
 }
 
 // A pattern entry against a resolved path key (CPDESTDIR1104, Dani B1): 'exact' when every segment matches (`*`
