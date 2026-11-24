@@ -2109,6 +2109,27 @@ const AGENT_MSG_RX = /(?:^|\/)scripts\/agent-msg\.sh$/
 // `<id> [done|failed] -`, i.e. an OPTIONAL status, so the content can sit at +2 as well.
 const MSG_HELPER_SINK_RX = /(?:^|\/)scripts\/agent-msg(?:-close)?\.sh$/
 const KANBAN_TOOL_RX = /(?:^|\/)scripts\/kartya-es-ertesites\.py$/
+// DASHPROSESINK1124: the dashboard API helper takes its payload on stdin and does nothing else with it either
+// (`BODY="$(timeout cat)"`, validated as JSON, handed to `curl -d`), so a reader piped into it is a data sink too --
+// and `cat <<'JSON' | bash scripts/dash-api.sh POST /api/daily-log` is the shape every CLAUDE.md PRESCRIBES for the
+// daily log, the memory writes and the kanban comments. MSGSINK1118 left it closed on purpose, with this reason:
+// "the endpoint is chosen in the same command and the list includes /api/approvals, /api/vault, /api/schedules".
+// That objection is the DISCRIMINATOR, not a reason to stay closed: the endpoint is one of the command's own words,
+// so this gate can read it. Only the PROSE endpoints are a sink; /api/approvals, /api/vault, /api/schedules, an
+// unknown path and a traversed one ("/api/daily-log/../vault") keep the deny, by construction -- an endpoint this
+// list does not name is not a sink. The helper itself refuses a third argument (`[ "$#" -le 2 ]`), so the shape is
+// exactly `<method> <path>`: more words mean another program's arguments, and the deny stays.
+const DASH_API_RX = /(?:^|\/)scripts\/dash-api\.sh$/
+const DASH_PROSE_PATH_RX = /^\/api\/(?:daily-log|memories|kanban\/[A-Za-z0-9][\w.-]*\/comments)$/
+export function isDashApiProseSink(words, name) {
+  if (!words || !words.length) return false
+  const i = (name === 'bash' || name === 'sh') ? 1 : 0
+  const script = words[i]
+  if (!script || !DASH_API_RX.test(script.value)) return false
+  const rest = words.slice(i + 1).map((w) => w.value)
+  if (rest.length !== 2 || rest[0] !== 'POST' || !DASH_PROSE_PATH_RX.test(rest[1])) return false
+  return words.every((w) => !w.dollar && !w.star)
+}
 export function isPipeSink(words, name) {
   if (TEXT_FILTERS.has(name)) return isReadOnlyFsCommand(words, name)
   // the inter-agent helpers: their stdin becomes message content, nothing else
