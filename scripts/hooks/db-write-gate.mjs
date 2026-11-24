@@ -57,6 +57,7 @@ import {
   expandBraces,
   expandHome,
   globMatchesName,
+  isDashApiProseSink,
   isPipeSink,
   isReadOnlyFsCommand,
   laterRuns,
@@ -1570,8 +1571,15 @@ export function installFileDeny(command, opts = {}) {
         // holds ONLY while the hit comes from the heredoc body alone. If the reader's OWN words name a protected path
         // (`cat ~/.claude/settings.json | bash scripts/agent-msg.sh ... -`), that file's CONTENT would leave as the
         // message, and the deny stays.
+        // DASHPROSESINK1124: the same for the dashboard API helper on its PROSE endpoints (daily log, memories,
+        // kanban comment). Measured cause of the false positive: ordinary Hungarian prose ends a parenthesis with a
+        // period ("... (ket koron)."), the word reader splits that into a bare `.`, `.` is a TARGET_SEGMENT_NAME, and
+        // in an agent's own directory `.` resolves to a cwd that CONTAINS a protected path -- an 'ancestor' hit. Every
+        // other branch of this loop already lets an ancestor-only hit pass; this one returned before reaching that
+        // rule. Added here, not in isPipeSink, so the self-pace surface and laterRuns keep their current reading.
         const hitFromBodyOnly = hitsBoth(ownText).length === 0
-        if (!nw || !(READERS.has(nn) || isReadOnlyFsCommand(nw, nn) || (hitFromBodyOnly && isPipeSink(nw, nn)))) return true
+        const dataSink = hitFromBodyOnly && (isPipeSink(nw, nn) || isDashApiProseSink(nw, nn))
+        if (!nw || !(READERS.has(nn) || isReadOnlyFsCommand(nw, nn) || dataSink)) return true
       }
       moveCwd(own, seg, ctx)
       continue

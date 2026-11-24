@@ -13,6 +13,16 @@
 // Deliberately NOT opened (each one is a separate decision, pinned below so a later widening is visible): dash-api.sh
 // (the endpoint is chosen in the same command and the list includes /api/approvals, /api/vault, /api/schedules),
 // marveen-api.sh (its prescribed form passes the text by FILE PATH anyway) and the kanban tool.
+//
+// >>> ONE OF THE THREE WAS OPENED SINCE, AND ONLY HALFWAY: DASHPROSESINK1124 (2026-11-24, michel 13452, boss 13453).
+// dash-api.sh is a data sink on its PROSE endpoints -- /api/daily-log, /api/memories, /api/kanban/<id>/comments --
+// and nowhere else. The reason written above is what made that possible rather than what blocked it: the endpoint IS
+// one of the command's words, so the gate reads it, and /api/approvals, /api/vault, /api/schedules, an unknown path
+// and a traversed one keep the deny. The /api/approvals row below stays in the denied table on purpose: it is the
+// control that the discrimination is by ENDPOINT, not by helper. The measured false positive it fixes was ordinary
+// Hungarian prose: a sentence closing a parenthesis ends `... (ket koron).`, which splits into a bare `.`.
+// The full table, the trigger's three-part cause and the shapes that must stay denied:
+// src/__tests__/db-write-gate-dash-api-prose-sink.test.ts. marveen-api.sh and the kanban tool are still closed.
 // The decision function only reads paths: nothing here writes a real config.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 // @ts-expect-error -- plain .mjs hook script, no types
@@ -94,9 +104,10 @@ describe('2. what the exception must NOT open', () => {
     // a sink that only LOOKS like the helper
     `cat <<'MSG' | bash @R@/scripts/agent-msg.sh.bak sanyiba boss -\n${BODY}\nMSG`,
     `cat <<'MSG' | bash @R@/scripts/not-agent-msg.sh sanyiba boss -\n${BODY}\nMSG`,
-    // DELIBERATELY not opened: these three are separate decisions, not this fix
-    `cat <<'JSON' | bash @R@/scripts/dash-api.sh POST /api/daily-log\n{"content":"${BODY.split('\n')[0]}"}\nJSON`,
+    // DELIBERATELY not opened: separate decisions, not this fix. dash-api.sh was opened on its PROSE endpoints by
+    // DASHPROSESINK1124; /api/approvals stays here as the control that the discrimination is by ENDPOINT.
     `cat <<'JSON' | bash @R@/scripts/dash-api.sh POST /api/approvals\n{"content":"${BODY.split('\n')[0]}"}\nJSON`,
+    `cat <<'JSON' | bash @R@/scripts/dash-api.sh POST /api/vault\n{"content":"${BODY.split('\n')[0]}"}\nJSON`,
     `cat <<'MSG' | bash @R@/scripts/marveen-api.sh message sanyiba boss -\n${BODY}\nMSG`,
     `cat <<'MSG' | python3 @R@/scripts/kartya-es-ertesites.py komment --kartya x --szoveg-stdin\n${BODY}\nMSG`,
   ])('denied: %s', (c) => { expect(run(c).deny).toBe(true) })
@@ -113,6 +124,8 @@ describe('3. a reader piped into a reader stays free, and the helper is matched 
     ['scripts/agent-msg.sh a b -', true],
     ['bash /x/scripts/agent-msg.sh.bak a b -', false],
     ['bash /x/scripts/marveen-api.sh message a b -', false],
+    // still false here, and that is not a leftover: DASHPROSESINK1124 added a SEPARATE predicate
+    // (isDashApiProseSink), used at the one reader-pipe site, so this sink list and laterRuns keep their reading
     ['bash /x/scripts/dash-api.sh POST /api/daily-log', false],
     ['bash $HELPER a b -', false],
   ])('isPipeSink(%s) -> %s', (cmd, want) => {
