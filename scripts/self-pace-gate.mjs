@@ -539,7 +539,9 @@ export function protectedSegments(command) {
 
 // protectedSegments plus what the definite-assignment rule needs: the separator after each segment ('' after the
 // last) and the mask. `quoteAware` false = the naive fallback, where no separator is known.
-function protectedSplit(command) {
+// Exported for the SQLGLOBARG1124 (2) composite test: a test that split with the naive splitSegments would
+// measure a different command (it cuts on the `)` of COUNT(*)), which is the mistake this round is about.
+export function protectedSplit(command) {
   const src = String(command ?? '').replace(/\\\r?\n/g, ' ')
   const heredocs = []
   const masked = maskInertLiterals(src, heredocs)
@@ -775,6 +777,44 @@ function inertCurlHeaders(src) {
 }
 
 // A glob, brace or unresolved word that can expand onto a protected name.
+// SQLGLOBARG1124 (sanyiba 13467, boss 13468): in `sqlite3 -readonly <db> "SELECT COUNT(*) FROM t"` the `*` is SQL
+// syntax, not a path operand -- sqlite3 expands no filename globs, and a SQL `*` / `LIKE` / `GLOB` pattern is matched
+// against DATA. The gate read it as a bare glob: `literalWords` deliberately leaves a glob-only token alone in a
+// quoted span (a re-shelled `"*"` IS expanded), and the compensating skip (bareGlobQuoted) only applies in the
+// CALLER'S OWN project dir. From the install root -- the cwd CLAUDE.md's own recipe uses, since the db path there is
+// relative -- the quoted `*` expanded onto .env / scripts / store, so an explicitly allowed read (`sqlite3 -readonly`,
+// SELECT) was denied for every sub-agent. Measured 2026-11-24: same command from the agent's own dir or from a third
+// directory passed, `count(id)` passed, and the main agent (whose project dir IS the install root) never saw it.
+//
+// The shape this recognises is exactly the measured one, and nothing wider: `-readonly`, no other option, exactly two
+// operands (the db and ONE sql argument), no dot-command, no expansion. Anything else keeps the deny -- more
+// arguments, `.read` / `.backup` / `.restore`, another reader, a re-shelled command (there `literal` is already false,
+// so this never runs). It removes only the GLOB reading: a path written out inside the SQL stays a word the gate sees,
+// so the db-file and protected-path rules are untouched.
+const SQLITE_NAMES = new Set(['sqlite3', 'sqlite'])
+const SQL_DOT_LINE_RX = /(?:^|\n)[ \t]*\./
+const SQL_DOT_WORD_RX = /\.(?:read|backup|restore|import|output|once|log|shell|system|clone|save|dump|excel|www|open|load)\b/i
+export function sqliteReadonlyQuery(words, name) {
+  if (!words || !words.length || !SQLITE_NAMES.has(name)) return false
+  const rest = words.slice(1)
+  if (!rest.some((w) => w.value === '-readonly')) return false
+  const operands = []
+  for (const w of rest) {
+    if (w.value === '-readonly') continue
+    if (w.value.startsWith('-')) return false
+    operands.push(w.value)
+  }
+  if (operands.length !== 2) return false
+  const sql = operands[1]
+  if (SQL_DOT_LINE_RX.test(sql) || SQL_DOT_WORD_RX.test(sql)) return false
+  // An expansion anywhere: the shell substitutes BEFORE sqlite3 sees the text, so a value carrying a newline and
+  // a dot-command would walk straight past the two checks above. A `w.dollar` test is NOT enough, and that is easy
+  // to get wrong: measured, shellWords sets it only for an UNQUOTED expansion (`db $T`), while "SELECT * FROM $T"
+  // keeps the $ in the value with dollar=false -- and inside double quotes the shell expands it just the same.
+  if (words.some((w) => w.dollar || /[$`]/.test(w.value))) return false
+  return true
+}
+
 function protectedPatternWord(text, ctx) {
   const src = inertCurlHeaders(String(text).replace(/\\\r?\n/g, '').replace(/\$\{IFS\}|\$IFS\b/g, ''))
   // An unresolved expansion is read as any text. One that STARTS a word may be an
@@ -793,7 +833,14 @@ function protectedPatternWord(text, ctx) {
       if (sameKey(real, ctx.root) || sameKey(real, ctx.store)) return true
     }
   }
-  for (const raw of words) {
+  // SQLGLOBARG1124 (2): in `sqlite3 -readonly <db> "SELECT COUNT(*) FROM t"` the `*` is SQL syntax, not a path
+  // operand -- sqlite3 expands no filename globs. The db-write gate reads the same word the same way and was
+  // narrowed for it (#6); THIS check kept denying the very same command, so only the deny MESSAGE changed and the
+  // call stayed blocked (lucky measured it, sanyiba reproduced and found this site). The name-mention checks above
+  // are untouched: a protected path written out INSIDE the SQL is still a word this gate sees.
+  const sqlWords = shellWords(String(text ?? ''))
+  const sqlRead = !!sqlWords && sqliteReadonlyQuery(sqlWords, commandName(sqlWords))
+  for (const raw of sqlRead ? [] : words) {
     // A word that STARTS with an unresolved expansion may be absolute: no known parent,
     // unless the cwd itself is the root or the store dir (then a relative reading counts).
     const unknownStart = raw.startsWith(UNRESOLVED) && !cwdProtected

@@ -70,10 +70,17 @@ import {
   shellSegments,
   shellWords,
   splitSegments,
+  sqliteReadonlyQuery,
   underKey,
 } from '../self-pace-gate.mjs'
 import { claudeInvocations } from './child-claude-channel-guard.mjs'
 import { mcpFileTargets } from './mcp-file-targets.mjs'
+
+// SQLGLOBARG1124 (2): the predicate now lives in self-pace-gate.mjs (the engine), because the SAME rule is
+// read in TWO places -- here and in the protected-store glob check there -- and this round measured what two
+// implementations of one rule cost: #6 narrowed this one, the other kept denying, and only the MESSAGE changed.
+// Re-exported so importers (and the SQLGLOBARG1124 test) keep their path to it.
+export { sqliteReadonlyQuery }
 
 // The install this gate guards: scripts/hooks/ -> scripts/ -> root.
 export const INSTALL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -616,44 +623,6 @@ export function literalQuotedGlobs(text, opts = {}) {
   }
   return out
 }
-// SQLGLOBARG1124 (sanyiba 13467, boss 13468): in `sqlite3 -readonly <db> "SELECT COUNT(*) FROM t"` the `*` is SQL
-// syntax, not a path operand -- sqlite3 expands no filename globs, and a SQL `*` / `LIKE` / `GLOB` pattern is matched
-// against DATA. The gate read it as a bare glob: `literalWords` deliberately leaves a glob-only token alone in a
-// quoted span (a re-shelled `"*"` IS expanded), and the compensating skip (bareGlobQuoted) only applies in the
-// CALLER'S OWN project dir. From the install root -- the cwd CLAUDE.md's own recipe uses, since the db path there is
-// relative -- the quoted `*` expanded onto .env / scripts / store, so an explicitly allowed read (`sqlite3 -readonly`,
-// SELECT) was denied for every sub-agent. Measured 2026-11-24: same command from the agent's own dir or from a third
-// directory passed, `count(id)` passed, and the main agent (whose project dir IS the install root) never saw it.
-//
-// The shape this recognises is exactly the measured one, and nothing wider: `-readonly`, no other option, exactly two
-// operands (the db and ONE sql argument), no dot-command, no expansion. Anything else keeps the deny -- more
-// arguments, `.read` / `.backup` / `.restore`, another reader, a re-shelled command (there `literal` is already false,
-// so this never runs). It removes only the GLOB reading: a path written out inside the SQL stays a word the gate sees,
-// so the db-file and protected-path rules are untouched.
-const SQLITE_NAMES = new Set(['sqlite3', 'sqlite'])
-const SQL_DOT_LINE_RX = /(?:^|\n)[ \t]*\./
-const SQL_DOT_WORD_RX = /\.(?:read|backup|restore|import|output|once|log|shell|system|clone|save|dump|excel|www|open|load)\b/i
-export function sqliteReadonlyQuery(words, name) {
-  if (!words || !words.length || !SQLITE_NAMES.has(name)) return false
-  const rest = words.slice(1)
-  if (!rest.some((w) => w.value === '-readonly')) return false
-  const operands = []
-  for (const w of rest) {
-    if (w.value === '-readonly') continue
-    if (w.value.startsWith('-')) return false
-    operands.push(w.value)
-  }
-  if (operands.length !== 2) return false
-  const sql = operands[1]
-  if (SQL_DOT_LINE_RX.test(sql) || SQL_DOT_WORD_RX.test(sql)) return false
-  // An expansion anywhere: the shell substitutes BEFORE sqlite3 sees the text, so a value carrying a newline and
-  // a dot-command would walk straight past the two checks above. A `w.dollar` test is NOT enough, and that is easy
-  // to get wrong: measured, shellWords sets it only for an UNQUOTED expansion (`db $T`), while "SELECT * FROM $T"
-  // keeps the $ in the value with dollar=false -- and inside double quotes the shell expands it just the same.
-  if (words.some((w) => w.dollar || /[$`]/.test(w.value))) return false
-  return true
-}
-
 export function literalHeredocBody(body) {
   const b = String(body ?? '')
   return /\$\(|`/.test(b) ? b : literalWords(b)
