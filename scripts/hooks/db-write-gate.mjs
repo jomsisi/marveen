@@ -585,8 +585,9 @@ export function reShellsText(text) {
 // left as it is: whether a quoted one may skip a noBareGlob entry stays the #2514 rule (bareGlobQuoted, the caller's
 // own project dir only); this literal reading is for the other glob words (`/**`, `*/`, `x[0]`) of quoted code and data.
 const GLOB_CHARS_G = /[*?[{]/g
-const literalWords = (span) => span.replace(/[^\s;&|<>()'"`=,:{}]+/g, (tok) => (/^(?:\.\/)*[*?]+$/.test(tok) ? tok : tok.replace(GLOB_CHARS_G, '_')))
-export function literalQuotedGlobs(text) {
+const literalWords = (span, opts = {}) => span.replace(/[^\s;&|<>()'"`=,:{}]+/g,
+  (tok) => (opts.bareGlobs !== true && /^(?:\.\/)*[*?]+$/.test(tok) ? tok : tok.replace(GLOB_CHARS_G, '_')))
+export function literalQuotedGlobs(text, opts = {}) {
   const s = String(text ?? '')
   let out = ''
   for (let i = 0; i < s.length; i++) {
@@ -596,7 +597,7 @@ export function literalQuotedGlobs(text) {
       let j = c === '$' ? i + 2 : i + 1
       while (j < s.length && s[j] !== "'") j += c === '$' && s[j] === '\\' ? 2 : 1
       if (j >= s.length) return s
-      out += literalWords(s.slice(i, j + 1))
+      out += literalWords(s.slice(i, j + 1), opts)
       i = j
       continue
     }
@@ -606,7 +607,7 @@ export function literalQuotedGlobs(text) {
       if (j >= s.length) return s
       const span = s.slice(i, j + 1)
       if (/\$\(|`/.test(span)) return s
-      out += literalWords(span)
+      out += literalWords(span, opts)
       i = j
       continue
     }
@@ -614,6 +615,44 @@ export function literalQuotedGlobs(text) {
   }
   return out
 }
+// SQLGLOBARG1124 (sanyiba 13467, boss 13468): in `sqlite3 -readonly <db> "SELECT COUNT(*) FROM t"` the `*` is SQL
+// syntax, not a path operand -- sqlite3 expands no filename globs, and a SQL `*` / `LIKE` / `GLOB` pattern is matched
+// against DATA. The gate read it as a bare glob: `literalWords` deliberately leaves a glob-only token alone in a
+// quoted span (a re-shelled `"*"` IS expanded), and the compensating skip (bareGlobQuoted) only applies in the
+// CALLER'S OWN project dir. From the install root -- the cwd CLAUDE.md's own recipe uses, since the db path there is
+// relative -- the quoted `*` expanded onto .env / scripts / store, so an explicitly allowed read (`sqlite3 -readonly`,
+// SELECT) was denied for every sub-agent. Measured 2026-11-24: same command from the agent's own dir or from a third
+// directory passed, `count(id)` passed, and the main agent (whose project dir IS the install root) never saw it.
+//
+// The shape this recognises is exactly the measured one, and nothing wider: `-readonly`, no other option, exactly two
+// operands (the db and ONE sql argument), no dot-command, no expansion. Anything else keeps the deny -- more
+// arguments, `.read` / `.backup` / `.restore`, another reader, a re-shelled command (there `literal` is already false,
+// so this never runs). It removes only the GLOB reading: a path written out inside the SQL stays a word the gate sees,
+// so the db-file and protected-path rules are untouched.
+const SQLITE_NAMES = new Set(['sqlite3', 'sqlite'])
+const SQL_DOT_LINE_RX = /(?:^|\n)[ \t]*\./
+const SQL_DOT_WORD_RX = /\.(?:read|backup|restore|import|output|once|log|shell|system|clone|save|dump|excel|www|open|load)\b/i
+export function sqliteReadonlyQuery(words, name) {
+  if (!words || !words.length || !SQLITE_NAMES.has(name)) return false
+  const rest = words.slice(1)
+  if (!rest.some((w) => w.value === '-readonly')) return false
+  const operands = []
+  for (const w of rest) {
+    if (w.value === '-readonly') continue
+    if (w.value.startsWith('-')) return false
+    operands.push(w.value)
+  }
+  if (operands.length !== 2) return false
+  const sql = operands[1]
+  if (SQL_DOT_LINE_RX.test(sql) || SQL_DOT_WORD_RX.test(sql)) return false
+  // An expansion anywhere: the shell substitutes BEFORE sqlite3 sees the text, so a value carrying a newline and
+  // a dot-command would walk straight past the two checks above. A `w.dollar` test is NOT enough, and that is easy
+  // to get wrong: measured, shellWords sets it only for an UNQUOTED expansion (`db $T`), while "SELECT * FROM $T"
+  // keeps the $ in the value with dollar=false -- and inside double quotes the shell expands it just the same.
+  if (words.some((w) => w.dollar || /[$`]/.test(w.value))) return false
+  return true
+}
+
 export function literalHeredocBody(body) {
   const b = String(body ?? '')
   return /\$\(|`/.test(b) ? b : literalWords(b)
@@ -1451,8 +1490,28 @@ export function installFileDeny(command, opts = {}) {
     // EOF; chmod +x x.sh && ./x.sh` runs the body as shell code, its globs expand): then both stay strict.
     const runsWritten = !!words && laterRuns(segs, segs.indexOf(seg), words.redirects.map((t) => t.value).filter((v) => v !== '/dev/null'))
     const literal = !ctx.reShell && !runsWritten
+    // SQLGLOBARG1124: in a read-only sqlite3 query the quoted bare glob is SQL syntax too -- but NOT when the cwd is
+    // itself inside a protected directory (another worker's home, a .claude tree). There every non-reading command is
+    // denied and that deny does not rest on a glob: taking the glob away would remove the only hit and open the case.
+    // Measured: the existing worker-config test (`cd ~/.marveen-worker && sqlite3 -readonly /x/y.db "SELECT count(*)
+    // FROM t"`) went green on the first version of this fix, which is exactly the regression it exists to catch.
+    // ...and only in the INSTALL tree, at a directory that merely CONTAINS protected paths. Two limits, both on
+    // purpose. (1) 'exact'/'under' means the cwd IS a protected directory or sits below one; there every non-reading
+    // command is denied and that deny must not rest on a glob. (2) Outside the install tree -- another worker's HOME,
+    // say -- a sub-agent has no business reading anyway, and the existing worker-config assertion encodes that
+    // broader intent, so the shape stays denied there. The measured false positive is the install root itself, which
+    // is the cwd CLAUDE.md's own recipe implies (its db path is relative).
+    const sqlCwdOk = (c) => {
+      if (!c) return true
+      const k = pathKey(c)
+      const { rootKey } = installTargets(ctx.root, ctx.subAgent, ctx.projectDir, ctx.configDir)
+      if (!sameKey(k, rootKey) && !underKey(k, rootKey)) return false
+      return !['exact', 'under', 'unresolved'].includes(classifyWord('.', { ...ctx, cwd: c }))
+    }
+    const sqlGlobs = !!words && sqliteReadonlyQuery(words, commandName(words))
+      && sqlCwdOk(ctx.cwd) && sqlCwdOk(ctx.altCwd)
     const bodies = literal ? seg.bodies.map(literalHeredocBody) : seg.bodies
-    const ownText = literal ? literalQuotedGlobs(own) : own
+    const ownText = literal ? literalQuotedGlobs(own, { bareGlobs: sqlGlobs }) : own
     const view = { ...seg, own, bodies, text: [ownText, ...bodies].join('\n') }
     ctx.cwdInsideDir = insideDir(ctx.cwd)
     // WORKERCFGDIR1104: the segment's own text (a heredoc body is never globbed) and the whole command (re-shelling)
